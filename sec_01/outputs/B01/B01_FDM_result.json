@@ -6,7 +6,7 @@
     "kt_estimate": 2.20486835206031,
     "near_hole_mae": 2.2477634548364023,
     "hole_geometry_error": 0.10475656017578476,
-    "wall_time_s": 0.0007655840017832816,
+    "wall_time_s": 0.0006861250149086118,
     "completion_flag": 1.0
   },
   "metadata": {

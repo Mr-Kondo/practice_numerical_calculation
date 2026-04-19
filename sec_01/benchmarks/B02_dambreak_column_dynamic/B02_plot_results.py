@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from sec_01.shared.io import read_yaml
 from sec_01.shared.visualization import ensure_fig_dir, load_result_jsons, save_bar_chart
 
 
@@ -38,46 +39,58 @@ def _plot_fvm(ax: plt.Axes, payload: dict) -> None:
     ax.set_title("FVM centerline height")
 
 
-def _plot_fem(ax: plt.Axes, payload: dict) -> None:
-    viz = payload.get("metadata", {}).get("viz", {})
-    quality = np.array(viz.get("quality_sample", []), dtype=float)
-    if quality.size:
-        im = ax.imshow(quality, cmap="viridis", origin="lower")
-        ax.figure.colorbar(im, ax=ax, shrink=0.8)
-    ax.set_title("FEM mesh quality sample")
-
-
 def _plot_sph(ax: plt.Axes, payload: dict) -> None:
     viz = payload.get("metadata", {}).get("viz", {})
     px = viz.get("particle_x", [])
     py = viz.get("particle_y", [])
     if px and py:
         ax.scatter(px, py, s=4, alpha=0.5, color="#E45756")
-    ax.set_title("SPH particles (sample)")
+    ax.set_title("Particle method (sample)")
+
+
+def _global_vorticity_limit(series: list) -> float:
+    """Return a global symmetric vorticity limit for contour comparison."""
+
+    if not series:
+        return 0.0
+    return max(float(np.max(np.abs(np.asarray(frame, dtype=float)))) for frame in series)
 
 
 def main() -> None:
     """Create B02 plots from saved method JSON outputs."""
 
     output_dir = Path(__file__).resolve().parents[2] / "outputs" / "B02"
+    cfg_path = Path(__file__).with_name("B02_common_cfg.yaml")
+    cfg = read_yaml(cfg_path)
+    axis_x_min = float(cfg.get("plot_axis_x_min", 0.0))
+    axis_x_max = float(cfg.get("plot_axis_x_max", 1.0))
+    axis_y_min = float(cfg.get("plot_axis_y_min", 0.0))
+    axis_y_max = float(cfg.get("plot_axis_y_max", 1.0))
+    front_y_min = float(cfg.get("plot_front_y_min", 0.0))
+    front_y_max = float(cfg.get("plot_front_y_max", 1.05))
+    compare_end_s = float(cfg.get("animation_compare_end_s", 0.60))
+
     fig_dir = ensure_fig_dir(output_dir)
     result_map = load_result_jsons(output_dir, benchmark="B02")
+    particle_method = "SPH"
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=140)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=140)
     axes_map = {
         "FVM": axes[0],
-        "SPH": axes[1],
-        "FEM": axes[2],
+        particle_method: axes[1],
     }
 
     for method, ax in axes_map.items():
         payload = result_map.get(method, {})
         if method == "FVM":
             _plot_fvm(ax, payload)
-        elif method == "FEM":
-            _plot_fem(ax, payload)
         elif method == "SPH":
             _plot_sph(ax, payload)
+            ax.set_title(f"{method} particles (sample)")
+        if method in {"FVM", "SPH"}:
+            ax.set_xlim(axis_x_min, axis_x_max)
+            ax.set_ylim(axis_y_min, axis_y_max)
+            ax.set_aspect("equal", adjustable="box")
         ax.grid(alpha=0.2)
 
     fig.tight_layout()
@@ -86,7 +99,8 @@ def main() -> None:
 
     labels: list[str] = []
     completion_values: list[float] = []
-    for method in ("FVM", "SPH", "FEM"):
+    methods_for_completion = ["FVM", particle_method]
+    for method in methods_for_completion:
         payload = result_map.get(method, {})
         if not payload:
             continue
@@ -103,7 +117,7 @@ def main() -> None:
 
     fig_front, ax_front = plt.subplots(1, 1, figsize=(7, 4), dpi=140)
     has_series = False
-    for method, color in (("FVM", "#4C78A8"), ("SPH", "#E45756")):
+    for method, color in (("FVM", "#4C78A8"), (particle_method, "#E45756")):
         payload = result_map.get(method, {})
         metrics = payload.get("metrics", {})
         ts = payload.get("metadata", {}).get("viz_timeseries", {})
@@ -126,15 +140,16 @@ def main() -> None:
         ax_front.set_title("B02 front position comparison")
         ax_front.set_xlabel("time [s]")
         ax_front.set_ylabel("front position x/L [-]")
-        ax_front.set_ylim(0.0, 1.05)
+        ax_front.set_xlim(0.0, compare_end_s)
+        ax_front.set_ylim(front_y_min, front_y_max)
         ax_front.grid(alpha=0.2)
         ax_front.legend()
         fvm_pass = float(result_map.get("FVM", {}).get("metrics", {}).get("acceptance_pass", 0.0)) > 0.5
-        sph_pass = float(result_map.get("SPH", {}).get("metrics", {}).get("acceptance_pass", 0.0)) > 0.5
+        sph_pass = float(result_map.get(particle_method, {}).get("metrics", {}).get("acceptance_pass", 0.0)) > 0.5
         ax_front.text(
             0.02,
             0.98,
-            f"FVM={'PASS' if fvm_pass else 'FAIL'} / SPH={'PASS' if sph_pass else 'FAIL'}",
+            f"FVM={'PASS' if fvm_pass else 'FAIL'} / {particle_method}={'PASS' if sph_pass else 'FAIL'}",
             transform=ax_front.transAxes,
             ha="left",
             va="top",
@@ -157,6 +172,7 @@ def main() -> None:
     y_edges = np.asarray(fvm_ts.get("y_edges", []), dtype=float)
     x_coord = np.asarray(fvm_ts.get("x_coord", []), dtype=float)
     y_coord = np.asarray(fvm_ts.get("y_coord", []), dtype=float)
+    omega_global = _global_vorticity_limit(fvm_vorticity_series)
     if fvm_times and fvm_depth_series and fvm_vorticity_series and x_edges.size and y_edges.size:
         target_times = [0.20, 0.40, min(float(fvm_times[-1]), 0.60)]
         fig_vortex, axes_vortex = plt.subplots(1, 3, figsize=(14, 4), dpi=140)
@@ -165,13 +181,14 @@ def main() -> None:
             depth_now = np.asarray(fvm_depth_series[idx], dtype=float)
             omega_now = np.asarray(fvm_vorticity_series[idx], dtype=float)
             ax.pcolormesh(x_edges, y_edges, depth_now, cmap="Blues", shading="flat")
-            omega_max = float(np.max(np.abs(omega_now)))
-            if omega_max > 1.0e-8 and x_coord.size and y_coord.size:
-                levels = np.linspace(-omega_max, omega_max, 7)
+            if omega_global > 1.0e-8 and x_coord.size and y_coord.size:
+                levels = np.linspace(-omega_global, omega_global, 7)
                 ax.contour(x_coord, y_coord, omega_now, levels=levels, colors="black", linewidths=0.45, alpha=0.55)
             ax.set_title(f"t={float(fvm_times[idx]):.3f}s")
             ax.set_xlabel("x / L [-]")
             ax.set_ylabel("y / H [-]")
+            ax.set_xlim(axis_x_min, axis_x_max)
+            ax.set_ylim(axis_y_min, axis_y_max)
             ax.set_aspect("equal", adjustable="box")
             ax.grid(alpha=0.15)
 

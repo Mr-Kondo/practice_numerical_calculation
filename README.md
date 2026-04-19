@@ -42,6 +42,10 @@
 	- uv run sec01-animate-b01
 	- uv run sec01-animate-b02
 
+B02 の比較対象は `FVM`, `SPH` です。B02 では `FEM` は実行しません。
+
+`uv run sec01-animate-b02` は B02 の標準 side-view timeseries（FVM vs SPH）を出力します。
+
 主な出力先:
 
 - sec_01/outputs/B01/B01_metrics.csv
@@ -50,6 +54,11 @@
 - sec_01/outputs/B02/figs
 - sec_01/outputs/B01/animations
 - sec_01/outputs/B02/animations
+
+B02 の主なアニメーション出力:
+
+- sec_01/outputs/B02/animations/B02_timeseries.gif
+- sec_01/outputs/B02/animations/B02_timeseries.mp4
 
 ## 4. 参考書籍
 
