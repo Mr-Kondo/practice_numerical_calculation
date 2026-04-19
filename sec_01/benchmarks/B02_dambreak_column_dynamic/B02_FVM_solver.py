@@ -56,6 +56,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     sample_interval = max(1, steps // 40)
     height_series: list[list[float]] = []
     sampled_steps: list[int] = []
+    x_coord = ((np.arange(nx, dtype=np.float64) + 0.5) * dx).tolist()
 
     for step in range(steps):
         # --- Momentum: u_t = -g * h_x (forward difference) ---
@@ -107,11 +108,13 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         "notes": "1-D shallow-water upwind scheme; CFL-stable internal dt.",
         "viz": {
             "x_index": list(range(nx)),
+            "x_coord": x_coord,
             "height_centerline": h.tolist(),
         },
         "viz_timeseries": {
             "frame_steps": sampled_steps,
             "x_index": list(range(nx)),
+            "x_coord": x_coord,
             "height_centerline_series": height_series,
         },
     }

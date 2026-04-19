@@ -38,11 +38,13 @@ def main() -> None:
     frame_count = _frame_count(result_map)
 
     # --- Pre-compute fixed axis limits for each subplot ---
-    # FVM: x-axis is x_index list; height values are normalised 0-1.
+    # FVM: x-axis is physical coordinate x/L when available; fallback to index.
     fvm_ts = result_map.get("FVM", {}).get("metadata", {}).get("viz_timeseries", {})
     x_idx = fvm_ts.get("x_index", [])
+    x_coord = fvm_ts.get("x_coord", [])
+    x_axis = x_coord if x_coord else x_idx
     h_series = fvm_ts.get("height_centerline_series", [])
-    fvm_xlim = (0, max(x_idx) if x_idx else frame_count - 1)
+    fvm_xlim = (min(x_axis), max(x_axis)) if x_axis else (0, frame_count - 1)
     fvm_ylim = (0.0, 1.05)
 
     # FEM: cumulative history plotted up to current frame.
@@ -83,9 +85,11 @@ def main() -> None:
     for frame_idx in range(frame_count):
         fig, axes = plt.subplots(2, 2, figsize=(10, 8), dpi=120)
 
-        if x_idx and h_series:
-            axes[0, 0].plot(x_idx, h_series[frame_idx], color="#4C78A8")
-        axes[0, 0].set_title("FVM centerline")
+        if x_axis and h_series:
+            axes[0, 0].plot(x_axis, h_series[frame_idx], color="#4C78A8")
+        axes[0, 0].set_title("FVM centerline (h/h0 vs x/L)")
+        axes[0, 0].set_xlabel("x / L [-]")
+        axes[0, 0].set_ylabel("h / h0 [-]")
         axes[0, 0].set_xlim(*fvm_xlim)
         axes[0, 0].set_ylim(*fvm_ylim)
         axes[0, 0].grid(alpha=0.2)
@@ -95,6 +99,8 @@ def main() -> None:
         if cr_series:
             axes[0, 1].plot(cr_series[: frame_idx + 1], label="collapsed_ratio", color="#72B7B2")
         axes[0, 1].set_title("FEM quality history")
+        axes[0, 1].set_xlabel("frame index [-]")
+        axes[0, 1].set_ylabel("quality metric [-]")
         axes[0, 1].set_xlim(*fem_xlim)
         axes[0, 1].set_ylim(*fem_ylim)
         axes[0, 1].grid(alpha=0.2)
@@ -102,7 +108,9 @@ def main() -> None:
 
         if px_series and py_series:
             axes[1, 0].scatter(px_series[frame_idx], py_series[frame_idx], s=7, alpha=0.45, color="#F58518")
-        axes[1, 0].set_title("SPH particles")
+        axes[1, 0].set_title("SPH particles (particle coordinates)")
+        axes[1, 0].set_xlabel("x / L [-]")
+        axes[1, 0].set_ylabel("y / H [-]")
         axes[1, 0].set_xlim(*sph_xlim)
         axes[1, 0].set_ylim(*sph_ylim)
         axes[1, 0].grid(alpha=0.2)
@@ -110,6 +118,8 @@ def main() -> None:
         if broken_series:
             axes[1, 1].plot(broken_series[: frame_idx + 1], color="#54A24B")
         axes[1, 1].set_title("DEM broken bonds")
+        axes[1, 1].set_xlabel("frame index [-]")
+        axes[1, 1].set_ylabel("broken bonds [-]")
         axes[1, 1].set_xlim(*dem_xlim)
         axes[1, 1].set_ylim(*dem_ylim)
         axes[1, 1].grid(alpha=0.2)

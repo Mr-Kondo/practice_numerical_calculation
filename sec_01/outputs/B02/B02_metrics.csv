@@ -1,5 +1,5 @@
 benchmark,method,broken_bonds,completion_flag,dof,first_failure_time,mass_error,mesh_collapsed_ratio,mesh_min_quality,peak_particle_speed,splash_spread_width,tip_displacement,wall_time_s
-B02,FEM,nan,1,768,nan,nan,1,-6.6613381e-16,nan,nan,nan,0.009852625
-B02,FVM,nan,1,180,nan,0,nan,nan,nan,0.61111111,nan,0.001043
-B02,SPH,nan,1,9000,nan,0,nan,nan,2.1755389,0.900219,nan,0.0270045
-B02,DEM,268,1,576,0.204,nan,nan,nan,nan,nan,0.11978379,0.11580779
+B02,FEM,nan,1,768,nan,nan,1,-6.6613381e-16,nan,nan,nan,0.010263
+B02,FVM,nan,1,180,nan,0,nan,nan,nan,0.61111111,nan,0.001044542
+B02,SPH,nan,1,9000,nan,0,nan,nan,2.1755389,0.900219,nan,0.027316208
+B02,DEM,268,1,576,0.204,nan,nan,nan,nan,nan,0.11978379,0.11636408
