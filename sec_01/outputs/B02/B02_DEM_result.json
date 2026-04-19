@@ -1,0 +1,17 @@
+{
+  "benchmark": "B02",
+  "method": "DEM",
+  "metrics": {
+    "dof": 576.0,
+    "first_failure_time": 0.648,
+    "broken_bonds": 1.0,
+    "tip_displacement": 0.0408218808469759,
+    "completion_flag": 1.0,
+    "wall_time_s": 0.07285891700303182
+  },
+  "metadata": {
+    "backend": "numpy",
+    "remaining_bonds": 531,
+    "notes": "Bond breakage models column tearing without mesh collapse."
+  }
+}

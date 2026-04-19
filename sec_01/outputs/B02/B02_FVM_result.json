@@ -1,0 +1,15 @@
+{
+  "benchmark": "B02",
+  "method": "FVM",
+  "metrics": {
+    "dof": 16200.0,
+    "mass_error": 0.0,
+    "splash_spread_width": 49.0,
+    "completion_flag": 1.0,
+    "wall_time_s": 0.007585625004139729
+  },
+  "metadata": {
+    "backend": "numpy",
+    "notes": "Conservative-grid proxy emphasizing mass transport."
+  }
+}

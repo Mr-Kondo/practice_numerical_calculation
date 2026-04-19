@@ -1,0 +1,16 @@
+{
+  "benchmark": "B02",
+  "method": "SPH",
+  "metrics": {
+    "dof": 9000.0,
+    "mass_error": 0.0,
+    "splash_spread_width": 0.5564170326436579,
+    "completion_flag": 1.0,
+    "peak_particle_speed": 0.5064337270663981,
+    "wall_time_s": 0.020419499996933155
+  },
+  "metadata": {
+    "backend": "numpy",
+    "notes": "Particle method naturally handles topology changes."
+  }
+}

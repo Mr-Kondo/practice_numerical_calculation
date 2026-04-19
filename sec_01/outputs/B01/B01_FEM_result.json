@@ -1,0 +1,16 @@
+{
+  "benchmark": "B01",
+  "method": "FEM",
+  "metrics": {
+    "dof": 11844.0,
+    "kt_estimate": 2.999420598225906,
+    "near_hole_mae": 0.0,
+    "hole_geometry_error": 0.03,
+    "wall_time_s": 0.0019745419995160773
+  },
+  "metadata": {
+    "backend": "numpy",
+    "point_count": 5922,
+    "notes": "Locally refined unstructured representation around the hole."
+  }
+}

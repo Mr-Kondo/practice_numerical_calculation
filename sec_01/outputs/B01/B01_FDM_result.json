@@ -1,0 +1,19 @@
+{
+  "benchmark": "B01",
+  "method": "FDM",
+  "metrics": {
+    "dof": 16200.0,
+    "kt_estimate": 2.8253977972689164,
+    "near_hole_mae": 0.1426061808838821,
+    "hole_geometry_error": 0.10475656017578476,
+    "wall_time_s": 0.0006159580079838634
+  },
+  "metadata": {
+    "backend": "numpy",
+    "grid_shape": [
+      90,
+      180
+    ],
+    "notes": "Structured grid with stair-step hole approximation."
+  }
+}

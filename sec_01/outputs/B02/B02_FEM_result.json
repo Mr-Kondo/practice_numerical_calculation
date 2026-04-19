@@ -1,0 +1,15 @@
+{
+  "benchmark": "B02",
+  "method": "FEM",
+  "metrics": {
+    "dof": 32400.0,
+    "mesh_min_quality": 0.221666829273242,
+    "mesh_collapsed_ratio": 0.0,
+    "completion_flag": 1.0,
+    "wall_time_s": 0.014990915995440446
+  },
+  "metadata": {
+    "backend": "numpy",
+    "notes": "Lagrangian mesh proxy where severe deformation degrades quality."
+  }
+}

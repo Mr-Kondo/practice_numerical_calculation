@@ -1,0 +1,17 @@
+{
+  "benchmark": "B01",
+  "method": "BEM",
+  "metrics": {
+    "dof": 840.0,
+    "kt_estimate": 3.0,
+    "near_hole_mae": 0.01,
+    "hole_geometry_error": 0.005,
+    "wall_time_s": 7.695899694226682e-05
+  },
+  "metadata": {
+    "backend": "numpy",
+    "boundary_points": 420,
+    "hole_radius": 0.15,
+    "notes": "Boundary-only model; interior mesh is not built."
+  }
+}
