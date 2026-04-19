@@ -154,6 +154,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     c0 = float(config.get("sph_c0", 30.0))
     gamma = float(config.get("sph_gamma", 7.0))
     alpha_visc = float(config.get("sph_alpha_visc", 0.06))
+    beta_visc = float(config.get("sph_beta_visc", 0.0))
 
     domain_x = 1.0
     domain_y = 1.0
@@ -189,7 +190,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     spacing = float(np.sqrt(fluid_area / max(float(particles), 1.0)))
     nx_part = max(1, int(round(dam_fraction / spacing)))
     ny_part = max(1, int(round(dam_height / spacing)))
-    
+
     particles = nx_part * ny_part
     x_part = np.linspace(spacing / 2.0, dam_fraction - spacing / 2.0, nx_part, dtype=np.float64)
     y_part = np.linspace(spacing / 2.0, dam_height - spacing / 2.0, ny_part, dtype=np.float64)
@@ -212,9 +213,11 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     vortex_area_series: list[float] = []
     particle_x_series: list[list[float]] = []
     particle_y_series: list[list[float]] = []
+    startup_diagnostics: list[dict[str, float]] = []
 
     sample_count = min(particles, int(config.get("sph_viz_sample_particles", 900)))
     sample_indices = rng.choice(particles, size=sample_count, replace=False)
+    startup_diag_steps = max(0, int(config.get("sph_startup_diag_steps", 10)))
 
     simulated_time = 0.0
     max_runup_like_height = 0.0
@@ -223,6 +226,30 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     y_edges = np.linspace(0.0, 1.0, ny + 1, dtype=np.float64)
     x_coord = 0.5 * (x_edges[:-1] + x_edges[1:])
     y_coord = 0.5 * (y_edges[:-1] + y_edges[1:])
+
+    # Save a true pre-step snapshot so the first visual frame is not mislabeled as t=0.
+    initial_speed = np.linalg.norm(velocities, axis=1)
+    depth_field, vel_x_grid, vel_y_grid, _ = _project_particles_to_grid(
+        positions=positions,
+        velocities=velocities,
+        mass=particle_mass,
+        rho0=rho0,
+        nx=nx,
+        ny=ny,
+    )
+    omega = _compute_vorticity(vel_x_grid, vel_y_grid, dx=1.0 / nx, dy=1.0 / ny)
+    sampled_steps.append(-1)
+    sampled_times.append(0.0)
+    front_position_series.append(float(np.quantile(positions[:, 0], front_quantile)))
+    max_speed_series.append(float(np.max(initial_speed) if initial_speed.size else 0.0))
+    depth_field_series.append(depth_field.tolist())
+    velocity_x_series.append(vel_x_grid.tolist())
+    velocity_y_series.append(vel_y_grid.tolist())
+    vorticity_series.append(omega.tolist())
+    vorticity_peak_series.append(float(np.max(np.abs(omega))))
+    vortex_area_series.append(float(np.mean(np.abs(omega) >= vortex_threshold)))
+    particle_x_series.append(positions[sample_indices, 0].tolist())
+    particle_y_series.append(positions[sample_indices, 1].tolist())
 
     for step in range(max_steps):
         if simulated_time >= target_sim_time:
@@ -245,7 +272,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
 
         sigma = 10.0 / (7.0 * np.pi * h_smooth * h_smooth)
         w0 = sigma * 1.0
-        
+
         for i in range(particles):
             rho_i = particle_mass * w0
             neighbours = _neighbour_candidates(cell_map, positions[i], 2.0 * h_smooth)
@@ -261,11 +288,11 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
                         qs = rs / h_smooth
                         w = np.zeros_like(qs)
                         mask1 = qs < 1.0
-                        w[mask1] = sigma * (1.0 - 1.5 * qs[mask1]**2 + 0.75 * qs[mask1]**3)
+                        w[mask1] = sigma * (1.0 - 1.5 * qs[mask1] ** 2 + 0.75 * qs[mask1] ** 3)
                         mask2 = (qs >= 1.0) & (qs < 2.0)
-                        w[mask2] = sigma * 0.25 * (2.0 - qs[mask2])**3
+                        w[mask2] = sigma * 0.25 * (2.0 - qs[mask2]) ** 3
                         rho_i += np.sum(particle_mass * w)
-            density[i] = max(rho_i, 0.5 * rho0)
+            density[i] = max(rho_i, 0.1 * rho0)
 
         pressure = (c0 * c0 * rho0 / gamma) * (np.power(density / rho0, gamma) - 1.0)
         pressure = np.maximum(pressure, 0.0)
@@ -281,39 +308,40 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             j_idx = j_idx[j_idx != i]
             if len(j_idx) == 0:
                 continue
-                
+
             r_vecs = positions[i] - positions[j_idx]
             rs = np.linalg.norm(r_vecs, axis=1)
             valid = (rs > 1.0e-12) & (rs < 2.0 * h_smooth)
             if not np.any(valid):
                 continue
-                
+
             j_idx = j_idx[valid]
             r_vecs = r_vecs[valid]
             rs = rs[valid]
-            
+
             qs = rs / h_smooth
             dwdq = np.zeros_like(qs)
             mask1 = qs < 1.0
-            dwdq[mask1] = sigma * (-3.0 * qs[mask1] + 2.25 * qs[mask1]**2)
+            dwdq[mask1] = sigma * (-3.0 * qs[mask1] + 2.25 * qs[mask1] ** 2)
             mask2 = (qs >= 1.0) & (qs < 2.0)
-            dwdq[mask2] = -sigma * 0.75 * (2.0 - qs[mask2])**2
-            
+            dwdq[mask2] = -sigma * 0.75 * (2.0 - qs[mask2]) ** 2
+
             grad_w = (dwdq / h_smooth)[:, np.newaxis] * (r_vecs / rs[:, np.newaxis])
-            
+
             vij = velocities[i] - velocities[j_idx]
             rij_dot_vij = np.sum(r_vecs * vij, axis=1)
             rho_ij = 0.5 * (density[i] + density[j_idx])
-            
+
             visc_term = np.zeros_like(rs)
             v_mask = rij_dot_vij < 0.0
             if np.any(v_mask):
-                mu_ij = h_smooth * rij_dot_vij[v_mask] / (rs[v_mask]**2 + eps)
-                visc_term[v_mask] = -alpha_visc * c0 * mu_ij / np.maximum(rho_ij[v_mask], 1.0e-12)
-                
+                mu_ij = h_smooth * rij_dot_vij[v_mask] / (rs[v_mask] ** 2 + eps)
+                rho_ij_safe = np.maximum(rho_ij[v_mask], 1.0e-12)
+                visc_term[v_mask] = (-alpha_visc * c0 * mu_ij + beta_visc * mu_ij**2) / rho_ij_safe
+
             pressure_term = pressure[i] / (density[i] * density[i]) + pressure[j_idx] / (density[j_idx] * density[j_idx])
             pair_coeff = -particle_mass * (pressure_term + visc_term)
-            
+
             acc[i] += np.sum(pair_coeff[:, np.newaxis] * grad_w, axis=0)
 
         velocities += dt_step * acc
@@ -345,7 +373,30 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         if np.any(positions[:, 0] > runup_band_x):
             max_runup_like_height = max(max_runup_like_height, float(np.max(positions[positions[:, 0] > runup_band_x, 1])))
 
-        if step % sample_interval == 0 or step == max_steps - 1 or simulated_time >= target_sim_time:
+        if step < startup_diag_steps:
+            right_hits = int(np.count_nonzero(right)) if right_boundary == "reflective" else int(np.count_nonzero(escaped))
+            startup_diagnostics.append(
+                {
+                    "step": float(step),
+                    "time": float(simulated_time),
+                    "density_min": float(np.min(density)),
+                    "density_max": float(np.max(density)),
+                    "pressure_min": float(np.min(pressure)),
+                    "pressure_max": float(np.max(pressure)),
+                    "zero_pressure_fraction": float(np.mean(pressure <= 0.0)),
+                    "max_speed": float(np.max(np.linalg.norm(velocities, axis=1))),
+                    "max_abs_vy": float(np.max(np.abs(velocities[:, 1]))),
+                    "floor_hits": float(np.count_nonzero(below)),
+                    "ceiling_hits": float(np.count_nonzero(above)),
+                    "left_hits": float(np.count_nonzero(left)),
+                    "right_hits": float(right_hits),
+                }
+            )
+
+        should_sample = (
+            (step > 0 and step % sample_interval == 0) or step == max_steps - 1 or simulated_time >= target_sim_time
+        )
+        if should_sample:
             front_position = float(np.quantile(positions[:, 0], front_quantile))
             speed = np.linalg.norm(velocities, axis=1)
             depth_field, vel_x_grid, vel_y_grid, counts = _project_particles_to_grid(
@@ -496,6 +547,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             "representation": "particle_and_projected_grid",
             "frame_steps": sampled_steps,
             "frame_times": sampled_times,
+            "sideview_frame_times": sampled_times,
             "simulated_time_end": float(simulated_time),
             "x_coord": x_coord.tolist(),
             "y_coord": y_coord.tolist(),
@@ -512,6 +564,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             "particle_x_series": particle_x_series,
             "particle_y_series": particle_y_series,
             "max_speed_series": max_speed_series,
+            "startup_diagnostics": startup_diagnostics,
         },
     }
 

@@ -168,6 +168,8 @@ def main() -> None:
     for frame_idx, target_time in enumerate(targets):
         fi = fvm_indices[frame_idx]
         si = sph_indices[frame_idx]
+        fvm_time_now = float(fvm_times[fi]) if fi < fvm_times.size else float(target_time)
+        sph_time_now = float(sph_times[si]) if si < sph_times.size else float(target_time)
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
 
@@ -193,7 +195,7 @@ def main() -> None:
             ax=axes[0],
             times=fvm_times,
             front=fvm_front,
-            current_time=float(target_time),
+            current_time=fvm_time_now,
             impact_time=fvm_impact,
             rebound_time=fvm_rebound,
             end_time=float(targets[-1]),
@@ -218,7 +220,7 @@ def main() -> None:
             ax=axes[1],
             times=sph_times,
             front=sph_front,
-            current_time=float(target_time),
+            current_time=sph_time_now,
             impact_time=sph_impact,
             rebound_time=sph_rebound,
             end_time=float(targets[-1]),
@@ -227,7 +229,20 @@ def main() -> None:
             color="#E45756",
         )
 
-        fig.suptitle(f"B02 timeseries side-view FVM vs SPH  t={target_time:.3f}s")
+        axes[1].text(
+            0.02,
+            0.98,
+            f"target={target_time:.3f}s\nactual={sph_time_now:.3f}s",
+            transform=axes[1].transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75},
+        )
+
+        fig.suptitle(
+            f"B02 timeseries side-view FVM vs SPH  target={target_time:.3f}s  fvm={fvm_time_now:.3f}s  sph={sph_time_now:.3f}s"
+        )
         fig.tight_layout()
 
         frame_path = frames_dir / f"B02_{frame_idx:04d}.png"
