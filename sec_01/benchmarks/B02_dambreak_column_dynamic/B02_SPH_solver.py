@@ -1,4 +1,15 @@
-"""B02 SPH proxy solver with optional MPS tensor acceleration."""
+"""B02 SPH solver for dam-break particle dynamics.
+
+Physics:
+  - Gravity acts in the negative-y direction on every particle.
+  - A grid-based density estimate (O(N * n_bins)) drives horizontal pressure
+    acceleration without the O(N^2) cost of full neighbour-pair SPH.
+  - Floor (y = 0) and left wall (x = 0) use inelastic-reflective boundary
+    conditions.  No right-wall constraint: particles spread freely.
+
+Initial condition: N particles uniformly distributed in a rectangular dam
+cell x in [0, dam_width_fraction], y in [0, 0.8], at rest.
+"""
 
 from __future__ import annotations
 
@@ -13,41 +24,8 @@ from sec_01.shared.runtime import MethodResult
 LOGGER = logging.getLogger(__name__)
 
 
-def _run_numpy(particles: np.ndarray, velocities: np.ndarray, steps: int, dt: float) -> tuple[np.ndarray, np.ndarray]:
-    """Advance particles with simple pressure-repulsion proxy."""
-
-    for _ in range(steps):
-        center = particles.mean(axis=0)
-        direction = particles - center
-        norm = np.linalg.norm(direction, axis=1, keepdims=True) + 1.0e-8
-        force = direction / norm
-        velocities = 0.995 * velocities + dt * force
-        particles = particles + dt * velocities
-    return particles, velocities
-
-
-def _run_torch_mps(particles: np.ndarray, velocities: np.ndarray, steps: int, dt: float) -> tuple[np.ndarray, np.ndarray]:
-    """Advance particles using torch backend when available."""
-
-    import torch
-
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    p = torch.tensor(particles, dtype=torch.float32, device=device)
-    v = torch.tensor(velocities, dtype=torch.float32, device=device)
-
-    for _ in range(steps):
-        center = p.mean(dim=0, keepdim=True)
-        direction = p - center
-        norm = torch.linalg.norm(direction, dim=1, keepdim=True) + 1.0e-8
-        force = direction / norm
-        v = 0.995 * v + dt * force
-        p = p + dt * v
-
-    return p.cpu().numpy(), v.cpu().numpy()
-
-
 def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
-    """Run particle-based SPH proxy.
+    """Run particle-based SPH dam-break proxy with gravity.
 
     Args:
         config: Benchmark configuration.
@@ -62,19 +40,78 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     n_particles = int(config["sph_particles"])
     steps = int(config["steps"])
     dt = float(config["dt"])
+    g = float(config.get("gravity", 9.81))
+    dam_fraction = float(config["dam_width_fraction"])
 
+    # Initial rectangular dam: x in [0, dam_fraction], y in [0, 0.8].
     particles = np.column_stack(
         [
-            rng.uniform(0.0, float(config["dam_width_fraction"]), n_particles),
+            rng.uniform(0.0, dam_fraction, n_particles),
             rng.uniform(0.0, 0.8, n_particles),
         ]
     )
     velocities = np.zeros_like(particles)
 
-    if backend.name == "torch-mps":
-        particles, velocities = _run_torch_mps(particles, velocities, steps=steps, dt=dt)
-    else:
-        particles, velocities = _run_numpy(particles, velocities, steps=steps, dt=dt)
+    # Grid-based density for pressure estimation (avoids O(N^2)).
+    n_bins_x = 60
+    n_bins_y = 30
+    domain_x = 1.0
+    domain_y = 1.0
+
+    sample_interval = max(1, steps // 40)
+    sampled_steps: list[int] = []
+    particle_x_series: list[list[float]] = []
+    particle_y_series: list[list[float]] = []
+    sample_size = min(320, n_particles)
+    sampled_indices = rng.choice(n_particles, size=sample_size, replace=False)
+
+    for step in range(steps):
+        # --- Gravity ---
+        velocities[:, 1] -= g * dt
+
+        # --- Grid-based pressure: horizontal acceleration from depth gradient ---
+        # Count particles in each (x, y) bin; column-sum gives a depth proxy.
+        xi = np.clip(
+            (particles[:, 0] / domain_x * n_bins_x).astype(np.int32),
+            0,
+            n_bins_x - 1,
+        )
+        yi = np.clip(
+            (particles[:, 1] / domain_y * n_bins_y).astype(np.int32),
+            0,
+            n_bins_y - 1,
+        )
+        grid = np.zeros((n_bins_y, n_bins_x), dtype=np.float64)
+        np.add.at(grid, (yi, xi), 1.0)
+        depth_col = grid.sum(axis=0)  # (n_bins_x,)
+        depth_norm = depth_col / max(depth_col.max(), 1.0)
+
+        # Pressure gradient: du_x/dt = -g * d(depth)/dx
+        grad_depth = np.empty(n_bins_x)
+        grad_depth[1:] = depth_norm[1:] - depth_norm[:-1]
+        grad_depth[0] = 0.0
+        ax_field = -g * grad_depth * n_bins_x  # multiply by 1/dx_bin
+        velocities[:, 0] += dt * ax_field[xi]
+
+        # --- Advect ---
+        particles += dt * velocities
+
+        # --- Boundary conditions ---
+        # Floor (y = 0): inelastic reflection.
+        below = particles[:, 1] < 0.0
+        particles[below, 1] = 0.0
+        velocities[below, 1] = np.abs(velocities[below, 1]) * 0.15
+        velocities[below, 0] *= 0.85  # horizontal friction
+
+        # Left wall (x = 0): inelastic reflection.
+        left = particles[:, 0] < 0.0
+        particles[left, 0] = 0.0
+        velocities[left, 0] = np.abs(velocities[left, 0]) * 0.2
+
+        if step % sample_interval == 0 or step == steps - 1:
+            sampled_steps.append(step)
+            particle_x_series.append(particles[sampled_indices, 0].tolist())
+            particle_y_series.append(particles[sampled_indices, 1].tolist())
 
     spread = float(np.quantile(particles[:, 0], 0.95) - np.quantile(particles[:, 0], 0.05))
     speed = np.linalg.norm(velocities, axis=1)
@@ -88,8 +125,18 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     }
 
     metadata = {
+        "status": "success",
         "backend": backend.name,
-        "notes": "Particle method naturally handles topology changes.",
+        "notes": "Gravity-driven SPH proxy with grid-based pressure and reflective walls.",
+        "viz": {
+            "particle_x": particles[: min(900, n_particles), 0].tolist(),
+            "particle_y": particles[: min(900, n_particles), 1].tolist(),
+        },
+        "viz_timeseries": {
+            "frame_steps": sampled_steps,
+            "particle_x_series": particle_x_series,
+            "particle_y_series": particle_y_series,
+        },
     }
 
     LOGGER.info("B02 SPH run finished: spread=%.4f", spread)

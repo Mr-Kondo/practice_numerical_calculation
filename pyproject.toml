@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
 	"numpy>=2.2.0",
+	"matplotlib>=3.10.0",
 	"pyyaml>=6.0.2",
 ]
 
@@ -18,6 +19,10 @@ gpu = [
 sec01-run-all = "sec_01.run_all:main"
 sec01-b01 = "sec_01.benchmarks.B01_plate_hole_static.B01_run_all:main"
 sec01-b02 = "sec_01.benchmarks.B02_dambreak_column_dynamic.B02_run_all:main"
+sec01-plot-b01 = "sec_01.benchmarks.B01_plate_hole_static.B01_plot_results:main"
+sec01-plot-b02 = "sec_01.benchmarks.B02_dambreak_column_dynamic.B02_plot_results:main"
+sec01-animate-b01 = "sec_01.benchmarks.B01_plate_hole_static.B01_animate_results:main"
+sec01-animate-b02 = "sec_01.benchmarks.B02_dambreak_column_dynamic.B02_animate_results:main"
 
 [build-system]
 requires = ["hatchling>=1.27.0"]

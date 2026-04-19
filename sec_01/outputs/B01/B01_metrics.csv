@@ -1,4 +1,4 @@
-benchmark,method,dof,hole_geometry_error,kt_estimate,near_hole_mae,wall_time_s
-B01,FDM,16200,0.10475656,2.8253978,0.14260618,0.00061595801
-B01,FEM,11844,0.03,2.9994206,0,0.001974542
-B01,BEM,840,0.005,3,0.01,7.6958997e-05
+benchmark,method,completion_flag,dof,hole_geometry_error,kt_estimate,near_hole_mae,wall_time_s
+B01,FDM,1,16200,0.10475656,2.2048684,2.2477635,0.000765584
+B01,FEM,1,11844,0.005,2.9995917,0.00040832905,0.000705792
+B01,BEM,1,840,0,3,0,0.00021095799

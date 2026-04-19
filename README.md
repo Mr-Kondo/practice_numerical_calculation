@@ -19,20 +19,49 @@
 
 ## 2. ディレクトリ構成
 
-各章の学習内容に合わせてフォルダを分割しています。
-今後、フォルダ構成を拡張しながら検証事例を順次追加していく予定です。
+各章の学習内容に合わせてフォルダーを分割しています。
+今後、フォルダー構成を拡張しながら検証事例を順次追加していく予定です。
 
 ## 3. 実行環境
 
 - Language: Python 3.10+
 - Libraries: NumPy, SciPy, Matplotlib
-- Code Generation: 本プロジェクトのベースコードは、論理的な一貫性と透明性を担保するため、LLM（Claude等）を活用して生成されています。
+- Code Generation: 本プロジェクトのベースコードは、論理的な一貫性と透明性を担保するため、LLM（GitHub Copilot等）を活用して生成されています。
+
+### 実行と可視化
+
+- 全体実行: uv run sec01-run-all
+	- 計算結果（JSON/CSV）に加えて、可視化画像を出力します。
+- ベンチマーク別実行:
+	- uv run sec01-b01
+	- uv run sec01-b02
+- 可視化のみ再生成:
+	- uv run sec01-plot-b01
+	- uv run sec01-plot-b02
+- アニメーションのみ再生成:
+	- uv run sec01-animate-b01
+	- uv run sec01-animate-b02
+
+主な出力先:
+
+- sec_01/outputs/B01/B01_metrics.csv
+- sec_01/outputs/B02/B02_metrics.csv
+- sec_01/outputs/B01/figs
+- sec_01/outputs/B02/figs
+- sec_01/outputs/B01/animations
+- sec_01/outputs/B02/animations
 
 ## 4. 参考書籍
 
 本プロジェクトの基盤となる理論および手法の特性評価にあたり、以下の文献を参考にしています。
 
 - 『いまさら聞けない計算力学の常識』
-	社団法人土木学会 応用力学委員会 計算力学小委員会（編）、丸善出版、2008年発行
+	社団法人土木学会応用力学委員会計算力学小委員会（編）、丸善出版、2008年発行
+	ISBN-13: 978-4-621-08022-1
+	https://ci.nii.ac.jp/ncid/BA88034634
+	https://ndlsearch.ndl.go.jp/books/R100000002-I000009987340
 - 『いまさら聞けない計算力学の定石』
-	公益社団法人土木学会 応用力学委員会 計算力学小委員会（編）、丸善出版、2020年発行
+	公益社団法人土木学会応用力学委員会計算力学小委員会（編）、丸善出版、2020年発行
+	ISBN-13: 978-4-621-30498-3
+	https://ci.nii.ac.jp/ncid/BB29909213
+	https://ndlsearch.ndl.go.jp/books/R100000002-I030301329

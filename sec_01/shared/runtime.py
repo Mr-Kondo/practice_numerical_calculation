@@ -136,3 +136,30 @@ def save_metrics_table(results: list[MethodResult], csv_path: Path) -> Path:
         raise
 
     return csv_path
+
+
+def create_failure_result(
+    benchmark: str,
+    method: str,
+    error_message: str,
+) -> MethodResult:
+    """Create a normalized failed result entry.
+
+    Args:
+        benchmark: Benchmark identifier.
+        method: Method identifier.
+        error_message: Failure message to persist.
+
+    Returns:
+        Method result with failed status metrics.
+    """
+
+    return MethodResult(
+        benchmark=benchmark,
+        method=method,
+        metrics={"completion_flag": 0.0},
+        metadata={
+            "status": "failed",
+            "error_message": error_message,
+        },
+    )

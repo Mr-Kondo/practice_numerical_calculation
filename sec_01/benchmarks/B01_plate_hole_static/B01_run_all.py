@@ -11,6 +11,7 @@ from sec_01.shared.io import read_yaml
 from sec_01.shared.runtime import (
     Timer,
     configure_logging,
+    create_failure_result,
     save_metrics_table,
     save_result,
     seed_everything,
@@ -31,13 +32,26 @@ def main() -> None:
 
     results = []
     for runner in (run_fdm, run_fem, run_bem):
-        with Timer() as timer:
-            result = runner(cfg, prefer_gpu=prefer_gpu)
-        result.metrics["wall_time_s"] = timer.elapsed_seconds
+        method_name = runner.__name__.removeprefix("run_").upper()
+        try:
+            with Timer() as timer:
+                result = runner(cfg, prefer_gpu=prefer_gpu)
+            result.metrics["wall_time_s"] = timer.elapsed_seconds
+            result.metrics.setdefault("completion_flag", 1.0)
+            result.metadata.setdefault("status", "success")
+        except Exception as exc:  # pylint: disable=broad-except
+            result = create_failure_result(
+                benchmark="B01",
+                method=method_name,
+                error_message=str(exc),
+            )
         save_result(result, outputs)
         results.append(result)
 
     save_metrics_table(results, outputs / "B01_metrics.csv")
+
+    success_count = sum(int(item.metrics.get("completion_flag", 0.0) > 0.0) for item in results)
+    print(f"B01 done: {success_count}/{len(results)} methods succeeded.")
 
 
 if __name__ == "__main__":
