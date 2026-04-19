@@ -55,9 +55,11 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
 
     n_nodes = nodes.shape[0]
 
-    sample_interval = max(1, steps // 40)
+    sample_interval = max(1, steps // 80)
     min_quality_series: list[float] = []
     collapsed_ratio_series: list[float] = []
+    node_x_series: list[list[float]] = []
+    node_y_series: list[list[float]] = []
     sampled_steps: list[int] = []
 
     for step in range(steps):
@@ -96,6 +98,8 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             sampled_steps.append(step)
             min_quality_series.append(float(np.min(jac)))
             collapsed_ratio_series.append(float(np.mean(jac < 0.2)))
+            node_x_series.append(nodes[:, 0].tolist())
+            node_y_series.append(nodes[:, 1].tolist())
 
     # Final mesh quality.
     y_disp_final = nodes[:, 1] - np.linspace(0.0, col_height, n_rows).tolist() * n_cols
@@ -120,8 +124,12 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         },
         "viz_timeseries": {
             "frame_steps": sampled_steps,
+            "frame_times": [step * dt for step in sampled_steps],
+            "dt": dt,
             "min_quality_series": min_quality_series,
             "collapsed_ratio_series": collapsed_ratio_series,
+            "node_x_series": node_x_series,
+            "node_y_series": node_y_series,
         },
     }
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_DEM_solver import run as run_dem
 from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_FEM_solver import run as run_fem
 from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_FVM_solver import run as run_fvm
 from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_SPH_solver import run as run_sph
@@ -32,7 +31,7 @@ def main() -> None:
     prefer_gpu = bool(cfg.get("prefer_gpu", False))
 
     results = []
-    for runner in (run_fem, run_fvm, run_sph, run_dem):
+    for runner in (run_fem, run_fvm, run_sph):
         method_name = runner.__name__.removeprefix("run_").upper()
         try:
             with Timer() as timer:
