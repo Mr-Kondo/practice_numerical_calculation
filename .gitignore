@@ -9,3 +9,4 @@ wheels/
 # Virtual environments
 .venv
 sec_01/outputs/B02/animations/frames/
+sec_01/outputs/B02/*_result.json

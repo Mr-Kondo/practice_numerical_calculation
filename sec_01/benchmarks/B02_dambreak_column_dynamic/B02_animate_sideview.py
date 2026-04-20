@@ -62,6 +62,26 @@ def _build_target_times(
     return np.linspace(0.0, max(common_end, 1.0e-9), frame_count, dtype=float)
 
 
+def _apply_frame_stride(targets: np.ndarray, stride: int) -> np.ndarray:
+    """Decimate target times to reduce render workload.
+
+    Args:
+        targets: Original target time sequence.
+        stride: Keep one frame every stride steps.
+
+    Returns:
+        Decimated target sequence while preserving the final frame.
+    """
+
+    if targets.size <= 2 or stride <= 1:
+        return targets
+
+    decimated = targets[::stride]
+    if float(decimated[-1]) < float(targets[-1]):
+        decimated = np.append(decimated, targets[-1])
+    return decimated
+
+
 def _plot_event_inset(
     ax: plt.Axes,
     times: np.ndarray,
@@ -94,6 +114,23 @@ def _plot_event_inset(
     inset.tick_params(labelsize=7)
 
 
+def _clear_existing_b02_frames(frames_dir: Path) -> int:
+    """Delete stale B02 frame files to avoid mixing runs.
+
+    Args:
+        frames_dir: Directory storing animation frames.
+
+    Returns:
+        Number of deleted frame files.
+    """
+
+    deleted = 0
+    for frame_path in frames_dir.glob("B02_*.png"):
+        frame_path.unlink()
+        deleted += 1
+    return deleted
+
+
 def main() -> None:
     """Generate B02 side-view timeseries animation for FVM and SPH."""
 
@@ -104,6 +141,9 @@ def main() -> None:
 
     output_dir = Path(__file__).resolve().parents[2] / "outputs" / "B02"
     animation_dir, frames_dir = ensure_animation_dirs(output_dir)
+    deleted_frames = _clear_existing_b02_frames(frames_dir)
+    if deleted_frames > 0:
+        LOGGER.info("Deleted %d stale B02 frame files from %s", deleted_frames, frames_dir)
 
     fvm_path = output_dir / "B02_FVM_result.json"
     sph_path = output_dir / "B02_SPH_result.json"
@@ -143,10 +183,14 @@ def main() -> None:
     compare_end_s = float(cfg.get("animation_compare_end_s", 0.60))
     compare_frames = int(cfg.get("animation_compare_frames", 180))
     fps = int(cfg.get("animation_fps", 8))
+    frame_stride = max(1, int(cfg.get("animation_frame_stride", 1)))
+    sph_max_points = max(0, int(cfg.get("animation_sph_max_points", 0)))
+    generate_gif = bool(cfg.get("animation_generate_gif", True))
 
     targets = _build_target_times(
         fvm_times=fvm_times, sph_times=sph_times, compare_end_s=compare_end_s, compare_frames=compare_frames
     )
+    targets = _apply_frame_stride(targets, frame_stride)
     fvm_indices = _nearest_indices(times=fvm_times, targets=targets, max_len=fvm_len)
     sph_indices = _nearest_indices(times=sph_times, targets=targets, max_len=sph_len)
 
@@ -206,6 +250,11 @@ def main() -> None:
 
         sx = np.asarray(sph_x_series[si], dtype=float)
         sy = np.asarray(sph_y_series[si], dtype=float)
+        # Keep scatter draw cost bounded for faster animation rendering.
+        if sph_max_points > 0 and sx.size > sph_max_points:
+            sample_idx = np.linspace(0, sx.size - 1, sph_max_points, dtype=np.int32)
+            sx = sx[sample_idx]
+            sy = sy[sample_idx]
         axes[1].scatter(sx, sy, s=6, alpha=0.45, color="#E45756")
         axes[1].axvline(1.0, color="#333333", linestyle="--", linewidth=1.0, alpha=0.9)
         axes[1].set_title("SPH side-view")
@@ -250,16 +299,27 @@ def main() -> None:
         plt.close(fig)
         frames.append(frame_path)
 
-    gif_path = animation_dir / "B02_timeseries.gif"
-    encode_gif_from_frames(frames=frames, output_path=gif_path, fps=fps)
+    if generate_gif:
+        gif_path = animation_dir / "B02_timeseries.gif"
+        encode_gif_from_frames(frames=frames, output_path=gif_path, fps=fps)
+    else:
+        gif_path = None
 
     mp4_path = animation_dir / "B02_timeseries.mp4"
-    encode_mp4_with_ffmpeg(
+    mp4_created = encode_mp4_with_ffmpeg(
         frames_pattern=str(frames_dir / "B02_%04d.png"),
         output_path=mp4_path,
         fps=fps,
+        frame_count=len(frames),
     )
-    LOGGER.info("Saved %s and %s", gif_path, mp4_path)
+    if gif_path is not None and mp4_created:
+        LOGGER.info("Saved %s and %s", gif_path, mp4_path)
+    elif gif_path is not None:
+        LOGGER.info("Saved %s (MP4 skipped: ffmpeg unavailable or encoding failed)", gif_path)
+    elif mp4_created:
+        LOGGER.info("Saved %s", mp4_path)
+    else:
+        LOGGER.warning("No animation file was saved. Check GIF setting and ffmpeg availability.")
 
 
 if __name__ == "__main__":
