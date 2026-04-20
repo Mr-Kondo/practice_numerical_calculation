@@ -12,7 +12,7 @@ column_y_fraction: 0.35
 column_height_fraction: 0.35
 column_width_fraction: 0.05
 break_strain: 0.12
-sph_particles: 1200
+sph_particles: 4800
 sph_initial_height: 0.8
 sph_front_quantile: 0.999
 sph_front_speed_threshold: 0.02
@@ -20,7 +20,7 @@ sph_front_mobile_min_particles: 24
 sph_front_wall_exclusion: 0.01
 sph_cfl: 0.25
 sph_dt_min_ratio: 0.03
-sph_smoothing_length: 0.022
+sph_smoothing_length: 0.013
 sph_rho0: 1000.0
 sph_c0: 24.0
 sph_gamma: 7.0
@@ -37,7 +37,7 @@ sph_vorticity_threshold: 0.60
 sph_vortex_min_duration_s: 0.05
 sph_vortex_min_area: 0.01
 sph_startup_diag_steps: 10
-sph_sample_interval: 18
+sph_sample_interval: 45
 sph_viz_sample_particles: 900
 target_sim_time_s: 0.60
 max_steps: 5000
