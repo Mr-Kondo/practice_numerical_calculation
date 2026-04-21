@@ -22,7 +22,7 @@ sph_cfl: 0.25
 sph_dt_min_ratio: 0.03
 sph_smoothing_length: 0.013
 sph_rho0: 1000.0
-sph_c0: 24.0
+sph_c0: 50.0
 sph_gamma: 7.0
 sph_alpha_visc: 0.02
 sph_beta_visc: 0.00
@@ -37,10 +37,10 @@ sph_vorticity_threshold: 0.60
 sph_vortex_min_duration_s: 0.05
 sph_vortex_min_area: 0.01
 sph_startup_diag_steps: 10
-sph_sample_interval: 45
+sph_sample_interval: 75
 sph_viz_sample_particles: 900
-target_sim_time_s: 0.60
-max_steps: 5000
+target_sim_time_s: 1.00
+max_steps: 18000
 rebound_window_s: 0.45
 rebound_min_drop: 0.08
 sph_rebound_wall_band_x: 0.92
@@ -52,8 +52,8 @@ accept_mass_error_max: 0.005
 accept_retained_mass_min: 0.995
 accept_escaped_mass_max: 0.005
 accept_runup_min: 0.05
-animation_compare_end_s: 0.60
-animation_compare_frames: 96
+animation_compare_end_s: 1.00
+animation_compare_frames: 160
 animation_fps: 16
 animation_frame_stride: 1
 animation_sph_max_points: 500

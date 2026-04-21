@@ -174,7 +174,7 @@ def main() -> None:
     y_coord = np.asarray(fvm_ts.get("y_coord", []), dtype=float)
     omega_global = _global_vorticity_limit(fvm_vorticity_series)
     if fvm_times and fvm_depth_series and fvm_vorticity_series and x_edges.size and y_edges.size:
-        target_times = [0.20, 0.40, min(float(fvm_times[-1]), 0.60)]
+        target_times = [0.20, 0.40, min(float(fvm_times[-1]), compare_end_s)]
         fig_vortex, axes_vortex = plt.subplots(1, 3, figsize=(14, 4), dpi=140)
         for ax, target_time in zip(axes_vortex, target_times):
             idx = int(np.argmin(np.abs(np.asarray(fvm_times, dtype=float) - target_time)))
