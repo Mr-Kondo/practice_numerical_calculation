@@ -72,11 +72,11 @@ fvm_initial_column_center_y_fraction: 0.35
 fvm_initial_column_height_fraction: 0.35
 fvm_transverse_perturbation: 0.10
 fvm_front_percentile: 0.995
-fvm_rebound_velocity_threshold: -0.02
-fvm_rebound_clip_cells: 2
+fvm_rebound_velocity_threshold: -0.005
+fvm_rebound_clip_cells: 1
 fvm_rebound_interior_band_width_cells: 4
-fvm_rebound_velocity_hold_s: 0.02
-fvm_rebound_wet_mass_min: 0.003
+fvm_rebound_velocity_hold_s: 0.01
+fvm_rebound_wet_mass_min: 0.0003
 fvm_rebound_clipped_min_drop: 0.0
 fvm_vorticity_threshold: 0.75
 fvm_vortex_min_duration_s: 0.05
