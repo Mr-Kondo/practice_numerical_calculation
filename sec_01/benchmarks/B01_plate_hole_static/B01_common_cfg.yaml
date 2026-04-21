@@ -1,0 +1,12 @@
+seed: 42
+plate_width: 2.0
+plate_height: 1.0
+hole_radius: 0.15
+remote_stress: 1.0
+resolution:
+  fdm_nx: 180
+  fdm_ny: 90
+  fem_points: 6000
+  bem_boundary_points: 420
+output_subdir: B01
+prefer_gpu: true
