@@ -1,2 +1,0 @@
-sph_right_wall_restitution_min,sph_right_wall_speed_ref,sph_right_wall_tangent_damping,acceptance_pass,rebound_flag,rebound_drop,front_arrival_time,mass_error,retained_mass_fraction,peak_particle_speed,wall_time_s
-0.08,1.0,0.08,1.0,1.0,0.0,0.27275712529845014,0.0,1.0,4.545119487604508,156.36665237499983
