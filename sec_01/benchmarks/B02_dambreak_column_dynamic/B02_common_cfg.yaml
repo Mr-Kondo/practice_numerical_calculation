@@ -54,7 +54,7 @@ accept_escaped_mass_max: 0.005
 accept_runup_min: 0.05
 animation_compare_end_s: 1.00
 animation_compare_frames: 160
-animation_fps: 16
+animation_fps: 160
 animation_frame_stride: 1
 animation_sph_max_points: 500
 animation_generate_gif: true
