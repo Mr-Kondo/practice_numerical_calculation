@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_FVM_solver import run as run_fvm
+from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_post_metrics import main as post_metrics_main
 from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_SPH_solver import run as run_sph
 from sec_01.shared.io import read_yaml
 from sec_01.shared.runtime import (
@@ -50,6 +51,7 @@ def main() -> None:
         results.append(result)
 
     save_metrics_table(results, outputs / "B02_metrics.csv")
+    post_metrics_main()
 
     success_count = sum(int(item.metrics.get("completion_flag", 0.0) > 0.0) for item in results)
     print(f"B02 done: {success_count}/{len(results)} methods succeeded.")

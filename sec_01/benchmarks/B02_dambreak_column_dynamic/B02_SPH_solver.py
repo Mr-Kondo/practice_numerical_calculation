@@ -157,7 +157,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     beta_visc = float(config.get("sph_beta_visc", 0.0))
 
     domain_x = 1.0
-    domain_y = 1.0
+    domain_y = float(config.get("sph_domain_y", 1.0))
     right_boundary = str(config.get("right_boundary", "reflective")).strip().lower()
     if right_boundary not in {"reflective", "open"}:
         raise ValueError(f"Unsupported B02 SPH right_boundary={right_boundary!r}")
@@ -170,11 +170,23 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     rebound_window = float(config.get("rebound_window_s", 0.45))
     rebound_min_drop = float(config.get("rebound_min_drop", 0.08))
     runup_band_x = float(config.get("runup_band_x", 0.95))
+    rebound_wall_band_x = float(config.get("sph_rebound_wall_band_x", 0.92))
+    rebound_vx_negative_threshold = float(config.get("sph_rebound_vx_negative_threshold", -0.02))
+    rebound_negative_fraction_min = float(config.get("sph_rebound_negative_fraction_min", 0.20))
 
     floor_restitution = float(config.get("sph_floor_restitution", 0.12))
     floor_friction = float(config.get("sph_floor_friction", 0.86))
     left_wall_restitution = float(config.get("sph_left_wall_restitution", 0.18))
     right_wall_restitution = float(config.get("sph_right_wall_restitution", 0.18))
+    right_wall_restitution = min(max(right_wall_restitution, 0.0), 1.0)
+    right_wall_restitution_min = float(config.get("sph_right_wall_restitution_min", 0.08))
+    right_wall_restitution_min = min(max(right_wall_restitution_min, 0.0), right_wall_restitution)
+    right_wall_speed_ref = max(float(config.get("sph_right_wall_speed_ref", 1.0)), 1.0e-6)
+    right_wall_tangent_damping = float(config.get("sph_right_wall_tangent_damping", 0.08))
+    right_wall_tangent_damping = min(max(right_wall_tangent_damping, 0.0), 0.99)
+    front_speed_threshold = max(float(config.get("sph_front_speed_threshold", 0.02)), 0.0)
+    front_mobile_min_particles = max(int(config.get("sph_front_mobile_min_particles", 24)), 1)
+    front_wall_exclusion = max(float(config.get("sph_front_wall_exclusion", 0.01)), 0.0)
 
     nx = int(config.get("grid_nx", 140))
     ny = int(config.get("grid_ny", 80))
@@ -211,6 +223,8 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     vorticity_series: list[list[list[float]]] = []
     vorticity_peak_series: list[float] = []
     vortex_area_series: list[float] = []
+    wall_band_mean_vx_series: list[float] = []
+    wall_band_negative_fraction_series: list[float] = []
     particle_x_series: list[list[float]] = []
     particle_y_series: list[list[float]] = []
     startup_diagnostics: list[dict[str, float]] = []
@@ -242,6 +256,14 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     sampled_times.append(0.0)
     front_position_series.append(float(np.quantile(positions[:, 0], front_quantile)))
     max_speed_series.append(float(np.max(initial_speed) if initial_speed.size else 0.0))
+    initial_wall_band = positions[:, 0] >= rebound_wall_band_x
+    if np.any(initial_wall_band):
+        wall_vx = velocities[initial_wall_band, 0]
+        wall_band_mean_vx_series.append(float(np.mean(wall_vx)))
+        wall_band_negative_fraction_series.append(float(np.mean(wall_vx <= rebound_vx_negative_threshold)))
+    else:
+        wall_band_mean_vx_series.append(0.0)
+        wall_band_negative_fraction_series.append(0.0)
     depth_field_series.append(depth_field.tolist())
     velocity_x_series.append(vel_x_grid.tolist())
     velocity_y_series.append(vel_y_grid.tolist())
@@ -364,7 +386,15 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         if right_boundary == "reflective":
             right = positions[:, 0] > domain_x
             positions[right, 0] = domain_x
-            velocities[right, 0] = -np.abs(velocities[right, 0]) * right_wall_restitution
+            if np.any(right):
+                # Use stronger damping at high impact speed to avoid overly uniform rebounds.
+                impact_speed = np.abs(velocities[right, 0])
+                restitution_scale = np.exp(-impact_speed / right_wall_speed_ref)
+                effective_restitution = (
+                    right_wall_restitution_min + (right_wall_restitution - right_wall_restitution_min) * restitution_scale
+                )
+                velocities[right, 0] = -np.abs(velocities[right, 0]) * effective_restitution
+                velocities[right, 1] *= 1.0 - right_wall_tangent_damping
         else:
             escaped = positions[:, 0] > domain_x
             escaped_mass_fraction = float(np.mean(escaped))
@@ -397,7 +427,18 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             (step > 0 and step % sample_interval == 0) or step == max_steps - 1 or simulated_time >= target_sim_time
         )
         if should_sample:
-            front_position = float(np.quantile(positions[:, 0], front_quantile))
+            # Prefer moving particles for front tracking to avoid wall-sticking tails masking rebound.
+            moving_front = np.abs(velocities[:, 0]) >= front_speed_threshold
+            if int(np.count_nonzero(moving_front)) >= front_mobile_min_particles:
+                front_source = positions[moving_front, 0]
+            else:
+                front_source = positions[:, 0]
+
+            # Exclude wall-clamped particles from front detection when possible.
+            front_bulk = front_source[front_source < (domain_x - front_wall_exclusion)]
+            if front_bulk.size >= front_mobile_min_particles:
+                front_source = front_bulk
+            front_position = float(np.quantile(front_source, front_quantile))
             speed = np.linalg.norm(velocities, axis=1)
             depth_field, vel_x_grid, vel_y_grid, counts = _project_particles_to_grid(
                 positions=positions,
@@ -415,6 +456,16 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             sampled_times.append(float(simulated_time))
             front_position_series.append(front_position)
             max_speed_series.append(float(np.max(speed) if speed.size else 0.0))
+
+            wall_band = positions[:, 0] >= rebound_wall_band_x
+            if np.any(wall_band):
+                wall_vx = velocities[wall_band, 0]
+                wall_band_mean_vx_series.append(float(np.mean(wall_vx)))
+                wall_band_negative_fraction_series.append(float(np.mean(wall_vx <= rebound_vx_negative_threshold)))
+            else:
+                wall_band_mean_vx_series.append(0.0)
+                wall_band_negative_fraction_series.append(0.0)
+
             depth_field_series.append(depth_field.tolist())
             velocity_x_series.append(vel_x_grid.tolist())
             velocity_y_series.append(vel_y_grid.tolist())
@@ -433,6 +484,10 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     impact_time = float("nan")
     rebound_time = float("nan")
     rebound_drop = 0.0
+    rebound_velocity_negative_fraction_peak = 0.0
+    rebound_velocity_mean_vx_min = 0.0
+    rebound_drop_flag = 0.0
+    rebound_velocity_flag = 0.0
     front_reached_flag = 0.0
     rebound_flag = 0.0
     if front_position_series and sampled_times:
@@ -456,8 +511,26 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
                     min_idx = idx
             rebound_drop = baseline - min_front
             if rebound_drop >= rebound_min_drop:
-                rebound_flag = 1.0
+                rebound_drop_flag = 1.0
                 rebound_time = float(sampled_times[min_idx])
+
+            neg_frac_peak = 0.0
+            min_mean_vx = 0.0
+            for idx in range(impact_idx, len(sampled_times)):
+                if sampled_times[idx] > end_t:
+                    break
+                neg_frac_peak = max(neg_frac_peak, float(wall_band_negative_fraction_series[idx]))
+                min_mean_vx = min(min_mean_vx, float(wall_band_mean_vx_series[idx]))
+
+            rebound_velocity_negative_fraction_peak = neg_frac_peak
+            rebound_velocity_mean_vx_min = min_mean_vx
+            if neg_frac_peak >= rebound_negative_fraction_min:
+                rebound_velocity_flag = 1.0
+
+            if rebound_drop_flag > 0.5 or rebound_velocity_flag > 0.5:
+                rebound_flag = 1.0
+                if np.isnan(rebound_time):
+                    rebound_time = float(impact_time)
 
     vortex_peak = max(vorticity_peak_series) if vorticity_peak_series else 0.0
     vortex_area_peak = max(vortex_area_series) if vortex_area_series else 0.0
@@ -481,6 +554,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         and front_reached_flag > 0.5
         and rebound_flag > 0.5
         and vortex_pass > 0.5
+        and mass_error <= float(config.get("accept_mass_error_max", 0.005))
         and retained_mass_fraction >= float(config.get("accept_retained_mass_min", 0.995))
         and escaped_mass_fraction <= float(config.get("accept_escaped_mass_max", 0.005))
         and max_runup_like_height >= float(config.get("accept_runup_min", 0.05))
@@ -499,6 +573,10 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         "impact_time": float(impact_time),
         "rebound_time": float(rebound_time),
         "rebound_drop": float(rebound_drop),
+        "rebound_drop_flag": float(rebound_drop_flag),
+        "rebound_velocity_flag": float(rebound_velocity_flag),
+        "rebound_velocity_negative_fraction_peak": float(rebound_velocity_negative_fraction_peak),
+        "rebound_velocity_mean_vx_min": float(rebound_velocity_mean_vx_min),
         "front_reached_flag": float(front_reached_flag),
         "rebound_flag": float(rebound_flag),
         "vorticity_peak": float(vortex_peak),
@@ -520,7 +598,17 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         "notes": (
             "2-D weakly-compressible SPH with cell-linked neighbour search, "
             "Tait EOS, and artificial viscosity "
-            f"(right boundary={right_boundary})."
+            f"(right boundary={right_boundary}, "
+            f"right wall restitution={right_wall_restitution:.3f}, "
+            f"min restitution={right_wall_restitution_min:.3f}, "
+            f"speed ref={right_wall_speed_ref:.3f}, "
+            f"tangential damping={right_wall_tangent_damping:.3f}, "
+            f"front speed threshold={front_speed_threshold:.3f}, "
+            f"front mobile min particles={front_mobile_min_particles}, "
+            f"front wall exclusion={front_wall_exclusion:.3f}, "
+            f"rebound wall band x={rebound_wall_band_x:.3f}, "
+            f"rebound vx threshold={rebound_vx_negative_threshold:.3f}, "
+            f"rebound negative fraction min={rebound_negative_fraction_min:.3f})."
         ),
         "boundary_conditions": {
             "left": "reflective",
