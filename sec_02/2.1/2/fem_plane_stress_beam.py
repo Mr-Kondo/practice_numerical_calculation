@@ -1441,17 +1441,23 @@ def plot_case(
     ax0.set_xlabel("x [mm]")
     ax0.set_ylabel("y [mm]")
 
-    # Von Mises stress (element-centred)
+    # Von Mises stress - flat-shaded element fill (same side-view as displacement plot)
     ax1 = axes[1]
     ax1.set_title("Von Mises stress [MPa]")
     ax1.set_aspect("equal")
 
-    cx = result.element_centers[:, 0]
-    cy = result.element_centers[:, 1]
     vm = result.von_mises
-
-    scatter = ax1.scatter(cx, cy, c=vm, cmap="hot_r", s=64, edgecolors="black", linewidths=0.35)
-    plt.colorbar(scatter, ax=ax1)
+    stress_triangles = build_plot_triangles(mesh)
+    stress_triang = Triangulation(
+        mesh.nodes[:, 0], mesh.nodes[:, 1], triangles=stress_triangles
+    )
+    # Quad elements are split into 2 triangles each; tri elements map 1:1.
+    if mesh.tri_elements is not None:
+        vm_per_tri = vm
+    else:
+        vm_per_tri = np.repeat(vm, 2)
+    tc1 = ax1.tripcolor(stress_triang, facecolors=vm_per_tri, cmap="hot_r")
+    plt.colorbar(tc1, ax=ax1)
     ax1.set_xlabel("x [mm]")
     ax1.set_ylabel("y [mm]")
 
