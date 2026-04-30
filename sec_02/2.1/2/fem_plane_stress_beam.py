@@ -1388,81 +1388,66 @@ def build_plot_triangles(mesh: MeshData) -> np.ndarray:
     return np.asarray(triangles, dtype=int)
 
 
-def plot_mesh_preview(mesh: MeshData, case_name: str, output_dir: Path) -> None:
-    """Save a mesh-only preview for visual verification against figure 2.3."""
-    fig, ax = plt.subplots(figsize=(8, 2.6))
-    triangles = build_plot_triangles(mesh)
-    triang = Triangulation(mesh.nodes[:, 0], mesh.nodes[:, 1], triangles=triangles)
-
-    ax.triplot(triang, color="0.25", linewidth=1.0)
-    ax.scatter(mesh.nodes[:, 0], mesh.nodes[:, 1], s=12, color="tab:red", zorder=3)
-    ax.set_aspect("equal")
-    ax.set_title(f"Mesh preview: {case_name}")
-    ax.set_xlabel("x [mm]")
-    ax.set_ylabel("y [mm]")
-    ax.set_xlim(-1.0, float(geometry["length"]) + 1.0)
-    ax.set_ylim(-0.8, float(geometry["height"]) + 0.8)
-    fig.tight_layout()
-
-    fname = output_dir / f"case_{case_name}_mesh.png"
-    fig.savefig(fname, dpi=150)
-    plt.close(fig)
-    LOGGER.info("Saved %s", fname)
-
-
-def plot_case(
+def plot_case_combined(
     mesh: MeshData,
     nodes: np.ndarray,
     result: CaseResult,
     output_dir: Path,
 ) -> None:
-    """Save displacement and von Mises stress plots for a single case.
+    """Save a single combined figure (mesh / displacement / Von Mises) for one case.
 
     Args:
-        mesh: Original mesh data (for boundary reference).
-        nodes: Node array used in this case (may include centroid nodes).
+        mesh: Original mesh data (corner nodes and connectivity).
+        nodes: Node array used in this case (may include midside nodes for QH/TH).
         result: Solved case result.
         output_dir: Directory to save figures.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4))
     fig.suptitle(f"Case {result.case_name}", fontsize=11)
 
-    # Displacement magnitude
-    disp_magnitude = np.linalg.norm(result.displacements.reshape(-1, 2), axis=1)
-    ax0 = axes[0]
-    ax0.set_title("Displacement magnitude [mm]")
-    ax0.set_aspect("equal")
-
     triangles = build_plot_triangles(mesh)
-    triang = Triangulation(nodes[:, 0], nodes[:, 1], triangles=triangles)
-    disp_interp = disp_magnitude[: nodes.shape[0]]
-    tc0 = ax0.tripcolor(triang, disp_interp, shading="gouraud", cmap="viridis")
-    plt.colorbar(tc0, ax=ax0)
+    triang_corner = Triangulation(mesh.nodes[:, 0], mesh.nodes[:, 1], triangles=triangles)
+
+    # Panel 0: Mesh preview
+    ax0 = axes[0]
+    ax0.set_title("Mesh")
+    ax0.set_aspect("equal")
+    ax0.triplot(triang_corner, color="0.25", linewidth=1.0)
+    ax0.scatter(mesh.nodes[:, 0], mesh.nodes[:, 1], s=12, color="tab:red", zorder=3)
     ax0.set_xlabel("x [mm]")
     ax0.set_ylabel("y [mm]")
+    ax0.set_xlim(-1.0, float(geometry["length"]) + 1.0)
+    ax0.set_ylim(-0.8, float(geometry["height"]) + 0.8)
 
-    # Von Mises stress - flat-shaded element fill (same side-view as displacement plot)
+    # Panel 1: Displacement magnitude (Gouraud shading on enriched node set)
     ax1 = axes[1]
-    ax1.set_title("Von Mises stress [MPa]")
+    ax1.set_title("Displacement magnitude [mm]")
     ax1.set_aspect("equal")
-
-    vm = result.von_mises
-    stress_triangles = build_plot_triangles(mesh)
-    stress_triang = Triangulation(
-        mesh.nodes[:, 0], mesh.nodes[:, 1], triangles=stress_triangles
-    )
-    # Quad elements are split into 2 triangles each; tri elements map 1:1.
-    if mesh.tri_elements is not None:
-        vm_per_tri = vm
-    else:
-        vm_per_tri = np.repeat(vm, 2)
-    tc1 = ax1.tripcolor(stress_triang, facecolors=vm_per_tri, cmap="hot_r")
+    disp_magnitude = np.linalg.norm(result.displacements.reshape(-1, 2), axis=1)
+    triang_full = Triangulation(nodes[:, 0], nodes[:, 1], triangles=triangles)
+    disp_interp = disp_magnitude[: nodes.shape[0]]
+    tc1 = ax1.tripcolor(triang_full, disp_interp, shading="gouraud", cmap="viridis")
     plt.colorbar(tc1, ax=ax1)
     ax1.set_xlabel("x [mm]")
     ax1.set_ylabel("y [mm]")
 
+    # Panel 2: Von Mises stress (flat shading per element)
+    ax2 = axes[2]
+    ax2.set_title("Von Mises stress [MPa]")
+    ax2.set_aspect("equal")
+    vm = result.von_mises
+    # Quad elements split into 2 triangles each; tri elements map 1:1.
+    if mesh.tri_elements is not None:
+        vm_per_tri = vm
+    else:
+        vm_per_tri = np.repeat(vm, 2)
+    tc2 = ax2.tripcolor(triang_corner, facecolors=vm_per_tri, cmap="hot_r")
+    plt.colorbar(tc2, ax=ax2)
+    ax2.set_xlabel("x [mm]")
+    ax2.set_ylabel("y [mm]")
+
     fig.tight_layout()
-    fname = output_dir / f"case_{result.case_name}_fields.png"
+    fname = output_dir / f"case_{result.case_name}.png"
     fig.savefig(fname, dpi=150)
     plt.close(fig)
     LOGGER.info("Saved %s", fname)
@@ -1665,11 +1650,10 @@ def run() -> None:
         results.append(result)
         nodes_per_case.append(nodes_used)
 
-    # Per-case field plots
+    # Per-case combined plots (mesh + displacement + Von Mises in one figure)
     if output_options.get("plot_case_fields", True):
         for mesh, result, nodes_used in zip(meshes, results, nodes_per_case):
-            plot_mesh_preview(mesh, result.case_name, output_dir)
-            plot_case(mesh, nodes_used, result, output_dir)
+            plot_case_combined(mesh, nodes_used, result, output_dir)
 
     # Cross-section stress profiles
     plot_stress_profiles(results, analytical, output_dir)
