@@ -169,6 +169,7 @@ class CaseResult:
     tip_deflection_mm: float
     sigma_x_fixed_end_MPa: float
     tau_xy_neutral_axis_MPa: float
+    nodal_vm: np.ndarray | None = None  # Von Mises averaged at corner nodes (for smooth plot)
 
 
 # ---------------------------------------------------------------------------
@@ -1208,6 +1209,89 @@ def compute_element_stress(
     return np.asarray(elem_stress), np.asarray(centers), np.asarray(vm_list)
 
 
+def compute_nodal_vm(
+    nodes: np.ndarray,
+    elements: np.ndarray,
+    displacements: np.ndarray,
+    constitutive: np.ndarray,
+    element_version: str,
+) -> np.ndarray:
+    """Compute Von Mises stress averaged at each corner node.
+
+    For each element the stress is evaluated at its corner nodes in natural
+    coordinates, then accumulated and averaged over all elements sharing a
+    node.  This produces a smooth nodal field suitable for Gouraud shading,
+    which correctly shows bending stress varying through the element height
+    even when ny=1 (a known limitation of centroid-based evaluation).
+
+    Args:
+        nodes: Shape (N, 2) node coordinates.
+        elements: Shape (E, n_nodes_per_elem) connectivity.
+        displacements: Flattened displacement vector (2N,).
+        constitutive: 3x3 constitutive matrix.
+        element_version: 'TL', 'QL', 'QH', or 'TH'.
+
+    Returns:
+        nodal_vm: Shape (N,) Von Mises stress at each node (0 for unreferenced).
+    """
+    # Natural coordinates of corner nodes for each element type.
+    # Q4/Q8: (xi, eta) at SW, SE, NE, NW corners.
+    _q4_corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+    # T3/T6: (L1, L2) barycentric at vertex 1, 2, 3 (L3 = 1-L1-L2).
+    _t_corners = [(1.0, 0.0), (0.0, 1.0), (0.0, 0.0)]
+
+    n_nodes = nodes.shape[0]
+    vm_sum = np.zeros(n_nodes, dtype=float)
+    vm_cnt = np.zeros(n_nodes, dtype=int)
+
+    for conn in elements:
+        coords = nodes[conn]
+        ue = np.zeros(2 * conn.size, dtype=float)
+        for loc_i, nid in enumerate(conn):
+            ue[2 * loc_i] = displacements[2 * nid]
+            ue[2 * loc_i + 1] = displacements[2 * nid + 1]
+
+        if element_version == "TL":
+            # CST: constant strain/stress - same value at all 3 corners.
+            b_mat, _ = cst_b_matrix(coords)
+            sigma = constitutive @ (b_mat @ ue)
+            vm = von_mises_plane_stress(float(sigma[0]), float(sigma[1]), float(sigma[2]))
+            for nid in conn:
+                vm_sum[nid] += vm
+                vm_cnt[nid] += 1
+
+        elif element_version == "QL":
+            for (xi, eta), nid in zip(_q4_corners, conn):
+                b_mat, _ = q4_b_matrix(coords, xi, eta)
+                sigma = constitutive @ (b_mat @ ue)
+                vm = von_mises_plane_stress(float(sigma[0]), float(sigma[1]), float(sigma[2]))
+                vm_sum[nid] += vm
+                vm_cnt[nid] += 1
+
+        elif element_version == "QH":
+            # Corner nodes are the first 4 entries; midside nodes are conn[4:8].
+            for (xi, eta), nid in zip(_q4_corners, conn[:4]):
+                b_mat, _ = q8_b_matrix(coords, xi, eta)
+                sigma = constitutive @ (b_mat @ ue)
+                vm = von_mises_plane_stress(float(sigma[0]), float(sigma[1]), float(sigma[2]))
+                vm_sum[nid] += vm
+                vm_cnt[nid] += 1
+
+        else:  # TH
+            # Corner nodes are the first 3 entries; midside nodes are conn[3:6].
+            for (L1, L2), nid in zip(_t_corners, conn[:3]):
+                b_mat, _ = t6_b_matrix(coords, L1, L2)
+                sigma = constitutive @ (b_mat @ ue)
+                vm = von_mises_plane_stress(float(sigma[0]), float(sigma[1]), float(sigma[2]))
+                vm_sum[nid] += vm
+                vm_cnt[nid] += 1
+
+    mask = vm_cnt > 0
+    nodal_vm = np.zeros(n_nodes, dtype=float)
+    nodal_vm[mask] = vm_sum[mask] / vm_cnt[mask]
+    return nodal_vm
+
+
 # ---------------------------------------------------------------------------
 # Cross-section extraction
 # ---------------------------------------------------------------------------
@@ -1281,6 +1365,7 @@ def solve_case(
     elapsed = time.perf_counter() - start
 
     stress, centers, von_mises = compute_element_stress(nodes, elements, displacements, constitutive, element_version)
+    nodal_vm = compute_nodal_vm(nodes, elements, displacements, constitutive, element_version)
 
     # Tip deflection: mean uy of all right-face nodes in original mesh.
     right_node_ids = np.unique(mesh.right_edges.ravel())
@@ -1346,6 +1431,7 @@ def solve_case(
         element_stress=stress,
         element_centers=centers,
         von_mises=von_mises,
+        nodal_vm=nodal_vm,
         dof_count=displacements.size,
         max_disp=max_disp,
         max_von_mises=float(np.max(von_mises)),
@@ -1431,17 +1517,14 @@ def plot_case_combined(
     ax1.set_xlabel("x [mm]")
     ax1.set_ylabel("y [mm]")
 
-    # Panel 2: Von Mises stress (flat shading per element)
+    # Panel 2: Von Mises stress (Gouraud shading on nodal-averaged values)
     ax2 = axes[2]
     ax2.set_title("Von Mises stress [MPa]")
     ax2.set_aspect("equal")
-    vm = result.von_mises
-    # Quad elements split into 2 triangles each; tri elements map 1:1.
-    if mesh.tri_elements is not None:
-        vm_per_tri = vm
-    else:
-        vm_per_tri = np.repeat(vm, 2)
-    tc2 = ax2.tripcolor(triang_corner, facecolors=vm_per_tri, cmap="hot_r")
+    # nodal_vm is defined over mesh.nodes (corner + possible midside nodes);
+    # triang_corner only references corner indices so only those values matter.
+    nodal_vm = result.nodal_vm if result.nodal_vm is not None else np.zeros(mesh.nodes.shape[0])
+    tc2 = ax2.tripcolor(triang_corner, nodal_vm[: mesh.nodes.shape[0]], shading="gouraud", cmap="hot_r")
     plt.colorbar(tc2, ax=ax2)
     ax2.set_xlabel("x [mm]")
     ax2.set_ylabel("y [mm]")
