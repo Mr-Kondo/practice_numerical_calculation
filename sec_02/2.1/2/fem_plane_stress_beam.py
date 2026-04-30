@@ -7,10 +7,11 @@ The implementation is being migrated to the textbook's original separation:
     - mesh pattern (figure 2.3): Q1, Q2, Q3, T1, T2, T3
     - element version (figure 2.2): QL, QH, TL, TH, ...
 
-This file currently implements the linear versions only:
+This file currently implements the linear and serendipity quadrilateral versions:
 
-    - Q1_QL, Q2_QL, Q3_QL
-    - T1_TL, T2_TL, T3_TL
+    - Q1_QL, Q2_QL, Q3_QL   (4-node bilinear quadrilateral)
+    - Q1_QH, Q2_QH, Q3_QH   (8-node serendipity quadrilateral)
+    - T1_TL, T2_TL, T3_TL   (3-node constant-strain triangle)
 
 The important correction is that T1/T2/T3 are now generated as direct
 triangle meshes following figure 2.3, instead of being produced by splitting
@@ -78,11 +79,14 @@ boundary_conditions: dict[str, Any] = {
     "left_edge_fixed": True,  # ux = uy = 0 on x = 0
 }
 
-# Current implemented cases: figure 2.3 mesh patterns with linear versions.
+# Current implemented cases: figure 2.3 mesh patterns with linear and QH versions.
 analysis_cases: list[dict[str, str]] = [
     {"name": "Q1_QL", "mesh_pattern": "Q1", "element_version": "QL"},
     {"name": "Q2_QL", "mesh_pattern": "Q2", "element_version": "QL"},
     {"name": "Q3_QL", "mesh_pattern": "Q3", "element_version": "QL"},
+    {"name": "Q1_QH", "mesh_pattern": "Q1", "element_version": "QH"},
+    {"name": "Q2_QH", "mesh_pattern": "Q2", "element_version": "QH"},
+    {"name": "Q3_QH", "mesh_pattern": "Q3", "element_version": "QH"},
     {"name": "T1_TL", "mesh_pattern": "T1", "element_version": "TL"},
     {"name": "T2_TL", "mesh_pattern": "T2", "element_version": "TL"},
     {"name": "T3_TL", "mesh_pattern": "T3", "element_version": "TL"},
@@ -125,6 +129,8 @@ class MeshData:
     fixed_nodes: np.ndarray  # shape (F,)    node indices on x = 0
     mesh_pattern: str
     characteristic_dx: float
+    q8_elements: np.ndarray | None = None  # shape (E, 8)  node indices per Q8 cell
+    right_edge_midnodes: np.ndarray | None = None  # shape (R,)  midside node per right edge
 
 
 @dataclass
@@ -381,11 +387,96 @@ def _build_triangle_mesh(pattern: str) -> MeshData:
 
 
 def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
-    """Generate one textbook mesh pattern directly from figure 2.3."""
+    """Generate one textbook mesh pattern directly from figure 2.3.
+
+    For QH element version the base Q4 mesh is enriched with midside nodes
+    to produce a Q8 (serendipity) mesh.
+    """
     mesh_pattern = case_cfg["mesh_pattern"]
+    element_version = case_cfg["element_version"]
     if mesh_pattern.startswith("Q"):
-        return _build_quad_mesh(mesh_pattern)
+        base_mesh = _build_quad_mesh(mesh_pattern)
+        if element_version == "QH":
+            return enrich_q4_to_q8(base_mesh)
+        return base_mesh
     return _build_triangle_mesh(mesh_pattern)
+
+
+# ---------------------------------------------------------------------------
+# Q8 mesh enrichment
+# ---------------------------------------------------------------------------
+
+
+def enrich_q4_to_q8(mesh: MeshData) -> MeshData:
+    """Add midside nodes to a Q4 mesh to produce a Q8 (serendipity) mesh.
+
+    Each edge shared between two Q4 elements gets exactly one midside node.
+    Boundary edges on the right face and fixed left face are handled
+    consistently so traction and constraint DOFs are correct.
+
+    Node ordering in each Q8 element:
+        [n_sw, n_se, n_ne, n_nw, m_s, m_e, m_n, m_w]
+
+    Args:
+        mesh: Q4 MeshData (must have quad_elements set).
+
+    Returns:
+        New MeshData with extended nodes, q8_elements, right_edge_midnodes,
+        and fixed_nodes augmented by left-edge midside nodes.
+
+    Raises:
+        ValueError: If mesh has no quadrilateral connectivity.
+    """
+    if mesh.quad_elements is None:
+        raise ValueError("enrich_q4_to_q8 requires quad_elements to be set.")
+
+    new_nodes: list[np.ndarray] = list(mesh.nodes)
+    edge_to_midnode: dict[tuple[int, int], int] = {}
+
+    def get_midnode(n1: int, n2: int) -> int:
+        """Return (creating if needed) the midside node index for edge (n1,n2)."""
+        key = (min(n1, n2), max(n1, n2))
+        if key not in edge_to_midnode:
+            mid = (mesh.nodes[n1] + mesh.nodes[n2]) * 0.5
+            idx = len(new_nodes)
+            new_nodes.append(mid)
+            edge_to_midnode[key] = idx
+        return edge_to_midnode[key]
+
+    # Build Q8 connectivity.  Q4 ordering: [SW, SE, NE, NW]
+    q8_list: list[list[int]] = []
+    for conn in mesh.quad_elements:
+        n_sw, n_se, n_ne, n_nw = int(conn[0]), int(conn[1]), int(conn[2]), int(conn[3])
+        m_s = get_midnode(n_sw, n_se)  # South midside
+        m_e = get_midnode(n_se, n_ne)  # East  midside
+        m_n = get_midnode(n_ne, n_nw)  # North midside
+        m_w = get_midnode(n_nw, n_sw)  # West  midside
+        q8_list.append([n_sw, n_se, n_ne, n_nw, m_s, m_e, m_n, m_w])
+
+    # Right-edge midside nodes (one per original right edge pair).
+    right_mid: list[int] = []
+    for n1, n2 in mesh.right_edges:
+        right_mid.append(get_midnode(int(n1), int(n2)))
+
+    # Fixed (left-edge) midside nodes.
+    sorted_fixed = np.sort(mesh.fixed_nodes)
+    left_mid: list[int] = []
+    for i in range(len(sorted_fixed) - 1):
+        left_mid.append(get_midnode(int(sorted_fixed[i]), int(sorted_fixed[i + 1])))
+
+    new_fixed = np.concatenate([mesh.fixed_nodes, np.asarray(left_mid, dtype=int)])
+
+    return MeshData(
+        nodes=np.asarray(new_nodes, dtype=float),
+        quad_elements=mesh.quad_elements,
+        tri_elements=None,
+        q8_elements=np.asarray(q8_list, dtype=int),
+        right_edges=mesh.right_edges,
+        right_edge_midnodes=np.asarray(right_mid, dtype=int),
+        fixed_nodes=new_fixed,
+        mesh_pattern=mesh.mesh_pattern,
+        characteristic_dx=mesh.characteristic_dx,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +612,138 @@ def q4_stiffness(coords: np.ndarray, constitutive: np.ndarray, thickness: float)
 
 
 # ---------------------------------------------------------------------------
+# Q8 serendipity element functions
+# ---------------------------------------------------------------------------
+
+
+def q8_shape_derivatives(xi: float, eta: float) -> np.ndarray:
+    """Return shape function derivatives dN/d(xi,eta) for Q8 serendipity.
+
+    Node ordering:
+        0 = SW (-1,-1), 1 = SE (+1,-1), 2 = NE (+1,+1), 3 = NW (-1,+1),
+        4 = S  ( 0,-1), 5 = E  (+1, 0), 6 = N  ( 0,+1), 7 = W  (-1, 0).
+
+    Shape functions:
+        Corner i: N_i = (1/4)(1 + xi_i*xi)(1 + eta_i*eta)(xi_i*xi + eta_i*eta - 1)
+        Mid-S (4): N_4 = (1/2)(1 - xi^2)(1 - eta)
+        Mid-E (5): N_5 = (1/2)(1 + xi)(1 - eta^2)
+        Mid-N (6): N_6 = (1/2)(1 - xi^2)(1 + eta)
+        Mid-W (7): N_7 = (1/2)(1 - xi)(1 - eta^2)
+
+    Args:
+        xi: Parent-space xi coordinate.
+        eta: Parent-space eta coordinate.
+
+    Returns:
+        Shape (8, 2) array; row i is [dNi/dxi, dNi/deta].
+    """
+    dN = np.zeros((8, 2), dtype=float)
+
+    # Corner node derivatives: N_i = (1/4)(1+xi_i*xi)(1+eta_i*eta)(xi_i*xi+eta_i*eta-1)
+    # dN_0/dxi  = (1/4)(1-eta)(2xi+eta),  dN_0/deta = (1/4)(1-xi)(xi+2eta)
+    dN[0, 0] = 0.25 * (1.0 - eta) * (2.0 * xi + eta)
+    dN[0, 1] = 0.25 * (1.0 - xi) * (xi + 2.0 * eta)
+
+    # dN_1/dxi  = (1/4)(1-eta)(2xi-eta),  dN_1/deta = (1/4)(1+xi)(-xi+2eta)
+    dN[1, 0] = 0.25 * (1.0 - eta) * (2.0 * xi - eta)
+    dN[1, 1] = 0.25 * (1.0 + xi) * (-xi + 2.0 * eta)
+
+    # dN_2/dxi  = (1/4)(1+eta)(2xi+eta),  dN_2/deta = (1/4)(1+xi)(xi+2eta)
+    dN[2, 0] = 0.25 * (1.0 + eta) * (2.0 * xi + eta)
+    dN[2, 1] = 0.25 * (1.0 + xi) * (xi + 2.0 * eta)
+
+    # dN_3/dxi  = (1/4)(1+eta)(2xi-eta),  dN_3/deta = (1/4)(1-xi)(-xi+2eta)
+    dN[3, 0] = 0.25 * (1.0 + eta) * (2.0 * xi - eta)
+    dN[3, 1] = 0.25 * (1.0 - xi) * (-xi + 2.0 * eta)
+
+    # Midside node derivatives
+    # N_4 = (1/2)(1-xi^2)(1-eta):  dN_4/dxi = -xi(1-eta),  dN_4/deta = -(1-xi^2)/2
+    dN[4, 0] = -xi * (1.0 - eta)
+    dN[4, 1] = -0.5 * (1.0 - xi**2)
+
+    # N_5 = (1/2)(1+xi)(1-eta^2):  dN_5/dxi = (1-eta^2)/2,  dN_5/deta = -(1+xi)*eta
+    dN[5, 0] = 0.5 * (1.0 - eta**2)
+    dN[5, 1] = -(1.0 + xi) * eta
+
+    # N_6 = (1/2)(1-xi^2)(1+eta):  dN_6/dxi = -xi(1+eta),  dN_6/deta = (1-xi^2)/2
+    dN[6, 0] = -xi * (1.0 + eta)
+    dN[6, 1] = 0.5 * (1.0 - xi**2)
+
+    # N_7 = (1/2)(1-xi)(1-eta^2):  dN_7/dxi = -(1-eta^2)/2,  dN_7/deta = -(1-xi)*eta
+    dN[7, 0] = -0.5 * (1.0 - eta**2)
+    dN[7, 1] = -(1.0 - xi) * eta
+
+    return dN
+
+
+def q8_b_matrix(coords: np.ndarray, xi: float, eta: float) -> tuple[np.ndarray, float]:
+    """Build Q8 strain-displacement matrix and Jacobian determinant.
+
+    Args:
+        coords: Shape (8, 2) node coordinates in the order defined by
+            q8_shape_derivatives (corners SW,SE,NE,NW then midsides S,E,N,W).
+        xi, eta: Parent-space coordinates.
+
+    Returns:
+        Tuple of (B matrix (3x16), det(J)).
+    """
+    dnd_parent = q8_shape_derivatives(xi, eta)  # (8, 2)
+    jacobian = coords.T @ dnd_parent  # (2, 2)
+    det_j = float(np.linalg.det(jacobian))
+    if det_j <= 0.0:
+        raise ValueError(f"Invalid Q8 Jacobian (det={det_j:.6e}). Check mesh distortion.")
+
+    inv_j = np.linalg.inv(jacobian)
+    dnd_global = dnd_parent @ inv_j  # (8, 2)
+
+    b_mat = np.zeros((3, 16), dtype=float)
+    for i in range(8):
+        dnx = dnd_global[i, 0]
+        dny = dnd_global[i, 1]
+        base = 2 * i
+        b_mat[0, base] = dnx
+        b_mat[1, base + 1] = dny
+        b_mat[2, base] = dny
+        b_mat[2, base + 1] = dnx
+
+    return b_mat, det_j
+
+
+def q8_stiffness(coords: np.ndarray, constitutive: np.ndarray, thickness: float) -> np.ndarray:
+    """Compute 16x16 Q8 element stiffness matrix using 3x3 Gauss integration.
+
+    Three-point Gauss quadrature is sufficient for exact integration of the
+    rational integrands arising from non-rectangular (distorted) Q8 elements.
+
+    Args:
+        coords: Shape (8, 2) node coordinates.
+        constitutive: 3x3 constitutive matrix.
+        thickness: Out-of-plane thickness b.
+
+    Returns:
+        16x16 stiffness matrix.
+    """
+    gp = np.sqrt(3.0 / 5.0)
+    w1, w2 = 5.0 / 9.0, 8.0 / 9.0
+    gauss_points = [
+        (-gp, -gp, w1 * w1),
+        (-gp, 0.0, w1 * w2),
+        (-gp, gp, w1 * w1),
+        (0.0, -gp, w2 * w1),
+        (0.0, 0.0, w2 * w2),
+        (0.0, gp, w2 * w1),
+        (+gp, -gp, w1 * w1),
+        (+gp, 0.0, w1 * w2),
+        (+gp, gp, w1 * w1),
+    ]
+    ke = np.zeros((16, 16), dtype=float)
+    for xi, eta, w in gauss_points:
+        b_mat, det_j = q8_b_matrix(coords, xi, eta)
+        ke += thickness * w * (b_mat.T @ constitutive @ b_mat) * det_j
+    return ke
+
+
+# ---------------------------------------------------------------------------
 # CST splitting utilities
 # ---------------------------------------------------------------------------
 
@@ -604,6 +827,11 @@ def assemble_system(
             raise ValueError(f"Quadrilateral connectivity missing for pattern {mesh.mesh_pattern}.")
         elements = mesh.quad_elements
         dof_per_element = 8
+    elif element_version == "QH":
+        if mesh.q8_elements is None:
+            raise ValueError(f"Q8 connectivity missing for pattern {mesh.mesh_pattern}.")
+        elements = mesh.q8_elements
+        dof_per_element = 16
     else:
         raise NotImplementedError(f"Element version {element_version} is not implemented yet.")
 
@@ -615,8 +843,10 @@ def assemble_system(
         coords = nodes[conn]
         if element_version == "TL":
             ke = cst_stiffness(coords, constitutive, thickness)
-        else:
+        elif element_version == "QL":
             ke = q4_stiffness(coords, constitutive, thickness)
+        else:
+            ke = q8_stiffness(coords, constitutive, thickness)
 
         dofs = np.zeros(dof_per_element, dtype=int)
         for local_idx, nid in enumerate(conn):
@@ -628,14 +858,22 @@ def assemble_system(
                 stiffness[i_glo, j_glo] += ke[i_loc, j_loc]
 
     # Apply right-face shear traction as equivalent nodal forces.
-    # Right-edge nodes are in the original mesh (centroid nodes are interior).
-    for n1, n2 in mesh.right_edges:
+    # For QL/TL: uniform traction on a linear edge -> each corner node gets L/2.
+    # For QH: quadratic edge with 3 nodes -> consistent nodal forces [1/6, 2/3, 1/6]*L.
+    for edge_idx, (n1, n2) in enumerate(mesh.right_edges):
         x1, y1 = mesh.nodes[n1]
         x2, y2 = mesh.nodes[n2]
         edge_length = float(np.hypot(x2 - x1, y2 - y1))
-        nodal_fy = traction_y * thickness * edge_length / 2.0
-        force[2 * n1 + 1] += nodal_fy
-        force[2 * n2 + 1] += nodal_fy
+        if element_version == "QH" and mesh.right_edge_midnodes is not None:
+            # Consistent nodal force for 3-node quadratic edge under uniform traction.
+            n_mid = int(mesh.right_edge_midnodes[edge_idx])
+            force[2 * n1 + 1] += traction_y * thickness * edge_length / 6.0
+            force[2 * n2 + 1] += traction_y * thickness * edge_length / 6.0
+            force[2 * n_mid + 1] += traction_y * thickness * edge_length * (2.0 / 3.0)
+        else:
+            nodal_fy = traction_y * thickness * edge_length / 2.0
+            force[2 * n1 + 1] += nodal_fy
+            force[2 * n2 + 1] += nodal_fy
 
     return stiffness.tocsr(), force, elements, nodes
 
@@ -720,12 +958,21 @@ def compute_element_stress(
         if element_version == "TL":
             b_mat, _ = cst_b_matrix(coords)
             sigma = constitutive @ (b_mat @ ue)
-        else:
+        elif element_version == "QL":
             gauss = 1.0 / np.sqrt(3.0)
             gp = [(-gauss, -gauss), (gauss, -gauss), (gauss, gauss), (-gauss, gauss)]
             sigmas = []
             for xi, eta in gp:
                 b_mat, _ = q4_b_matrix(coords, xi, eta)
+                sigmas.append(constitutive @ (b_mat @ ue))
+            sigma = np.mean(np.asarray(sigmas), axis=0)
+        else:
+            # QH: average stress over 2x2 Gauss points (sufficient for stress output)
+            g = 1.0 / np.sqrt(3.0)
+            gp_qh = [(-g, -g), (g, -g), (g, g), (-g, g)]
+            sigmas = []
+            for xi, eta in gp_qh:
+                b_mat, _ = q8_b_matrix(coords, xi, eta)
                 sigmas.append(constitutive @ (b_mat @ ue))
             sigma = np.mean(np.asarray(sigmas), axis=0)
 
@@ -894,14 +1141,26 @@ def solve_case(
 
 
 def build_plot_triangles(mesh: MeshData) -> np.ndarray:
-    """Build triangle connectivity for plotting from the explicit mesh topology."""
+    """Build triangle connectivity for plotting from the explicit mesh topology.
+
+    For Q8 meshes the plot uses the 4 corner nodes of each element (same
+    decomposition as Q4) so that the mesh outline is visualised correctly
+    without adding centroid nodes just for display purposes.
+    """
     if mesh.tri_elements is not None:
         return mesh.tri_elements
-    if mesh.quad_elements is None:
+
+    # Use Q4 corners, or the first 4 nodes of each Q8 element (corner nodes).
+    quad_conn = mesh.quad_elements
+    if quad_conn is None and mesh.q8_elements is not None:
+        quad_conn = mesh.q8_elements[:, :4]
+
+    if quad_conn is None:
         raise ValueError(f"Mesh pattern {mesh.mesh_pattern} has no plottable connectivity.")
 
     triangles: list[list[int]] = []
-    for n_sw, n_se, n_ne, n_nw in mesh.quad_elements:
+    for row in quad_conn:
+        n_sw, n_se, n_ne, n_nw = int(row[0]), int(row[1]), int(row[2]), int(row[3])
         triangles.append([n_sw, n_se, n_ne])
         triangles.append([n_sw, n_ne, n_nw])
     return np.asarray(triangles, dtype=int)
