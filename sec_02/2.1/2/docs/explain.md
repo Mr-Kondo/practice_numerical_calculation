@@ -1,234 +1,211 @@
-# sec 2.1.2 — Cantilever Beam under Tip Shear (Plane Stress)
+# sec 2.1.2 — 片持ちはりの先端せん断荷重問題（平面応力）
 
-## 1. Problem description
+## 実装状況
 
-A slender cantilever beam of length $L$, height $h$, and out-of-plane width $b$
-is clamped at $x = 0$ and loaded by a uniform shear traction $\tau_0$ on the
-right face ($x = L$).  The problem is analysed under **plane-stress** conditions
-($\sigma_z = \tau_{xz} = \tau_{yz} = 0$).
+本コードは以下の方針で整理している。
 
-Parameters used in this analysis:
+- 図 2.3 が **メッシュパターン**（Q1, Q2, Q3, T1, T2, T3）を定義する
+- 図 2.2 が **要素バージョン**（QL, QH, TL, TH）を定義する
 
-| Symbol | Value | Unit |
-|--------|-------|------|
-| $E$ | 30 000 | MPa |
-| $\nu$ | 0.30 | — |
-| $L$ | 40 | mm |
-| $h$ | 10 | mm |
-| $b$ (thickness) | 1 | mm |
-| $\tau_0$ | $-1$ | MPa (downward) |
-| $P = \tau_0 \cdot h \cdot b$ | $10$ | N |
+現在の実装は線形版のみ対応済みである。
 
----
+| ケース名 | メッシュパターン | 要素バージョン | 状態 |
+|---------|--------------|-------------|------|
+| Q1_QL   | Q1           | QL（4節点四辺形）| 実装済み |
+| Q2_QL   | Q2           | QL           | 実装済み |
+| Q3_QL   | Q3           | QL           | 実装済み |
+| T1_TL   | T1           | TL（3節点三角形）| 実装済み |
+| T2_TL   | T2           | TL           | 実装済み |
+| T3_TL   | T3           | TL           | 実装済み |
+| Q1_QH   | Q1           | QH（8節点四辺形）| 実装予定 |
+| Q2_QH   | Q2           | QH           | 実装予定 |
+| Q3_QH   | Q3           | QH           | 実装予定 |
+| T1_TH   | T1           | TH（6節点三角形）| 実装予定 |
+| T2_TH   | T2           | TH           | 実装予定 |
+| T3_TH   | T3           | TH           | 実装予定 |
 
-## 2. Analytical reference solution
-
-### 2.1 Tip deflection
-
-**Euler-Bernoulli** (bending only):
-
-$$
-\delta_{\text{EB}} = \frac{P L^3}{3 E I}
-$$
-
-**Timoshenko** (bending + shear):
-
-$$
-\delta_T = \frac{P L^3}{3 E I} + \frac{P L}{\kappa G A}
-\qquad \kappa = \tfrac{5}{6} \text{ (rectangular section)}
-$$
-
-where $I = b h^3 / 12$, $A = b h$, $G = E / [2(1+\nu)]$.
-
-For the given parameters:
-
-$$
-\delta_{\text{EB}} = 0.08533 \text{ mm}, \qquad \delta_T = 0.08949 \text{ mm}
-$$
-
-The shear contribution accounts for about 4.9 % of the total deflection.
-
-### 2.2 Bending stress at the fixed end
-
-$$
-\sigma_x(x=0,\, y) = \frac{M \cdot z}{I},
-\quad M = P L,
-\quad z = y - \frac{h}{2}
-$$
-
-Peak value at $z = \pm h/2$:
-
-$$
-|\sigma_x|_{\max} = \frac{P L (h/2)}{I} = 24.0 \text{ MPa}
-$$
-
-### 2.3 Maximum shear stress
-
-The parabolic distribution along any vertical cross-section:
-
-$$
-\tau_{xy}(y) = \frac{P}{2I}\left[\left(\frac{h}{2}\right)^2 - z^2\right]
-$$
-
-Peak at the neutral axis ($z = 0$):
-
-$$
-\tau_{xy,\max} = \frac{P h^2}{8 I} = \frac{3P}{2 A} = 1.5 \text{ MPa}
-$$
+QI（非適合四辺形）は本節では除外する。
 
 ---
 
-## 3. Finite element formulations
+## 1. 問題設定
 
-### 3.1 Plane-stress constitutive matrix
+長さ $L$、高さ $h$、奥行き $b$ の細長い片持ちはりを考える。
+$x = 0$ 端（固定端）を完全拘束し、$x = L$ 端（自由端）の上面・下面に
+放物線分布のせん断力合力 $P$ を作用させる。
+
+| パラメータ | 値 |
+|-----------|-----|
+| $L$       | 8.0 m |
+| $h$       | 2.0 m |
+| $b$       | 1.0 m |
+| $E$       | 30 000 MPa |
+| $\nu$     | 0.25 |
+| $P$       | 40 kN |
+
+境界条件（有限要素モデル）:
+- $x = 0$ 上の全節点: $u_x = u_y = 0$（ディリクレ条件）
+- $x = L$ 端: 放物線分布のせん断トラクション $\tau_{xy}(y) = \tau_0 (1 - 4y^2/h^2)$ を積分して等価節点力に変換
+
+---
+
+## 2. 理論解
+
+### 2.1 Euler-Bernoulli（EB）はり理論
+
+断面二次モーメント $I = bh^3/12$ を用いると、先端たわみは
+
+$$
+\delta_\mathrm{EB} = \frac{PL^3}{3EI}
+$$
+
+### 2.2 Timoshenko はり理論
+
+せん断変形補正係数 $\kappa = 5/6$（矩形断面）、せん断弾性係数 $G = E/[2(1+\nu)]$ を用いると
+
+$$
+\delta_\mathrm{Tim} = \frac{PL^3}{3EI} + \frac{PL}{\kappa G A}
+$$
+
+### 2.3 曲げ応力（断面内最大）
+
+$$
+\sigma_{x,\max} = \frac{M_\max \cdot c}{I} = \frac{PL \cdot (h/2)}{I}
+$$
+
+### 2.4 せん断応力（中立面）
+
+$$
+\tau_{xy,\max} = \frac{3P}{2bh}
+$$
+
+数値例（上記パラメータ）:
+
+| 量 | 値 |
+|---|---|
+| $\delta_\mathrm{EB}$ | 0.085333 mm |
+| $\delta_\mathrm{Tim}$ | 0.089493 mm |
+| $\sigma_{x,\max}$ | 24.0 MPa |
+| $\tau_{xy,\max}$ | 1.5 MPa |
+
+---
+
+## 3. 有限要素定式化
+
+### 3.1 平面応力の弾性マトリクス
 
 $$
 \mathbf{D} = \frac{E}{1-\nu^2}
 \begin{bmatrix}
 1 & \nu & 0 \\
 \nu & 1 & 0 \\
-0 & 0 & \tfrac{1-\nu}{2}
+0 & 0 & \frac{1-\nu}{2}
 \end{bmatrix}
 $$
 
-### 3.2 CST element (3-node constant-strain triangle)
+### 3.2 CST 要素（TL: 3 節点定ひずみ三角形）
 
-The strain field is constant within each element:
-
-$$
-\boldsymbol{\varepsilon} = \mathbf{B}\,\mathbf{u}^e,
-\qquad \mathbf{B} = \frac{1}{2A}
-\begin{bmatrix}
-b_1 & 0 & b_2 & 0 & b_3 & 0 \\
-0 & c_1 & 0 & c_2 & 0 & c_3 \\
-c_1 & b_1 & c_2 & b_2 & c_3 & b_3
-\end{bmatrix}
-$$
-
-Element stiffness: $\mathbf{K}^e = b A \,\mathbf{B}^T \mathbf{D} \mathbf{B}$.
-
-### 3.3 Q4 element (4-node bilinear quadrilateral)
-
-Shape functions in parent space $(\xi,\eta) \in [-1,1]^2$:
+変位を節点座標の 1 次関数で補間する。ひずみ $\boldsymbol{\varepsilon} = \mathbf{B}\mathbf{u}$ の $\mathbf{B}$ マトリクスは要素内定数となる。
+要素剛性マトリクスは
 
 $$
-N_i = \tfrac{1}{4}(1 + \xi_i\,\xi)(1 + \eta_i\,\eta)
+\mathbf{K}^e = t A \, \mathbf{B}^\top \mathbf{D} \mathbf{B}
 $$
 
-The stiffness is computed by $2 \times 2$ Gauss integration:
+ここで $t$ は板厚（本問では $b = 1$ m）、$A$ は三角形面積。
+
+### 3.3 Q4 要素（QL: 4 節点双線形四辺形）
+
+アイソパラメトリック座標 $(\xi, \eta) \in [-1, 1]^2$ を用いた双線形補間
 
 $$
-\mathbf{K}^e = b \int_{-1}^{1}\!\int_{-1}^{1} \mathbf{B}^T \mathbf{D} \mathbf{B}
-\det(\mathbf{J})\,d\xi\,d\eta
-\approx b \sum_{k=1}^{4} \mathbf{B}_k^T \mathbf{D} \mathbf{B}_k \det(\mathbf{J}_k)
+N_i(\xi, \eta) = \tfrac{1}{4}(1 + \xi_i \xi)(1 + \eta_i \eta)
+$$
+
+$\mathbf{B}$ マトリクスはヤコビアン $\mathbf{J}$ を用いて算出し、$2 \times 2$ ガウス積分で剛性マトリクスを評価する。
+
+$$
+\mathbf{K}^e = t \int_{-1}^{1}\int_{-1}^{1} \mathbf{B}^\top \mathbf{D} \mathbf{B} \,|\mathbf{J}|\, d\xi\, d\eta
 $$
 
 ---
 
-## 4. Six mesh cases (figure 2.3)
+## 4. メッシュパターンと実装済みケース
 
-| Case | Element | Mesh type | Split method | Nodes | DOF |
-|------|---------|-----------|-------------|-------|-----|
-| Q1 | Q4 | Regular coarse (4x2) | — | 15 | 30 |
-| Q2 | Q4 | Distorted coarse (4x2) | — | 15 | 30 |
-| Q3 | Q4 | Regular fine (8x4) | — | 45 | 90 |
-| T1 | CST | Regular coarse (4x2) | X-split (4 tri/cell) | 23 | 46 |
-| T2 | CST | Regular coarse (4x2) | Diagonal (2 tri/cell) | 15 | 30 |
-| T3 | CST | Regular fine (8x4) | X-split (4 tri/cell) | 77 | 154 |
+図 2.3 に対応する 6 種類のメッシュパターンを以下に示す。
+いずれも同一節点数（$n_x \times n_y = 4 \times 2$ 分割、計 15 節点、DOF = 20 or 54）を基本とする。
 
-### 4.1 Distorted mesh (Q2)
+| パターン | 概要 | 特記事項 |
+|---------|------|---------|
+| Q1 | 規則正しい矩形 Q4 メッシュ（正則） | 参照解 |
+| Q2 | 台形状に歪んだ Q4 メッシュ（歪み比 0.40） | 歪みによる精度低下を確認 |
+| Q3 | 節点を細かくした精細 Q4 メッシュ | DOF が増加し精度向上 |
+| T1 | Q1 を右上がり対角線で 2 分した三角形メッシュ | 方向異性に注意 |
+| T2 | Q1 を X パターンで 4 分した三角形メッシュ（非均一歪み） | 上辺 0.18・下辺 0.32 の非対称歪み |
+| T3 | 精細三角形メッシュ | DOF が増加し精度向上 |
 
-Interior node x-coordinates are shifted by a parallelogram distortion:
-
-$$
-\Delta x_j = \alpha \cdot \Delta x_{\text{cell}} \cdot \frac{j}{n_y}
-$$
-
-where $j$ is the row index, $\alpha = 0.5$.
-Boundary nodes (left and right faces) are not shifted to preserve the exact
-boundary conditions.  Distortion degrades the Jacobian condition and reduces
-the effective order of the element.
-
-### 4.2 X-split vs. diagonal split (T1 vs. T2)
-
-**Diagonal split** (T2): each Q4 is cut by the SW-NE diagonal, producing
-two triangles.  The pattern introduces directional bias: elements oriented
-along one diagonal are stiffer for shear than elements oriented the other way.
-This symmetry breaking leads to larger deflection underestimation.
-
-**X-split** (T1, T3): each Q4 is subdivided into four triangles by inserting
-a centroid node.  The four-way symmetry reduces directional bias and gives
-better accuracy for a given number of Q4 parent cells, though at the cost
-of extra DOFs (centroid nodes).
+三角形メッシュ（T1〜T3）は Q4 を事後分割するのではなく、節点・接続情報を直接生成している。
+これにより図 2.3 のトポロジーを正確に再現している。
 
 ---
 
-## 5. Results discussion
+## 5. 結果考察
 
-### 5.1 Deflection accuracy
+### 5.1 先端たわみ
 
-| Case | Tip deflection [mm] | Error vs Timoshenko |
-|------|--------------------:|--------------------:|
-| Q1   | 0.06243 | 30.2 % |
-| Q2   | 0.04802 | 46.3 % |
-| Q3   | 0.08021 | 10.4 % |
-| T1   | 0.05610 | 37.3 % |
-| T2   | 0.03417 | 61.8 % |
-| T3   | 0.07731 | 13.6 % |
+| ケース | 先端たわみ [mm] | Timoshenko 比誤差 |
+|-------|---------------|-----------------|
+| Q1_QL | 0.06009 | −32.9 % |
+| Q2_QL | 0.04733 | −47.1 % |
+| Q3_QL | 0.07872 | −12.0 % |
+| T1_TL | 0.02627 | −70.6 % |
+| T2_TL | 0.02521 | −71.8 % |
+| T3_TL | 0.05616 | −37.2 % |
 
-Key observations:
+（参考：$\delta_\mathrm{EB} = 0.08533$ mm、$\delta_\mathrm{Tim} = 0.08949$ mm）
 
-- **Shear locking** is the dominant source of error on coarse meshes (Q1, T1, T2).
-  Low-order displacement-based elements are too stiff in bending-dominated problems
-  because spurious shear strains consume energy that should be stored as bending.
-- **Q2 (distorted)** is worse than Q1 despite having the same DOF count.
-  Mesh distortion degrades the Jacobian mapping and reduces integration accuracy.
-- **Q3 (fine Q4)** is the best performer: 8 elements along the span reduce locking
-  and give near-Timoshenko accuracy.
-- **T2 (diagonal CST)** has the largest error because the diagonal split introduces
-  strong directional bias that artificially stiffens the model.
-- **T3 (fine X-split CST)** slightly outperforms Q3 in absolute error, but requires
-  154 DOFs vs 90 for Q3, making Q3 more efficient per DOF.
+### 5.2 考察
 
-### 5.2 Why CST underperforms Q4
+1. **せん断ロッキング**
+   低次要素（QL, TL）は純曲げ状態でせん断ひずみが寄生的に発生し、剛性が過大評価される。
+   その結果、たわみが理論値を大幅に下回る。三角形（TL）は Q4 よりも顕著にロッキングする。
 
-CST has a constant strain field throughout each element.  For a beam in bending,
-the strain varies linearly through the depth, so CST requires a much finer mesh
-than Q4 to capture the same accuracy.  Q4, with its bilinear displacement field,
-can represent the linear bending strain distribution much more faithfully.
+2. **メッシュ歪みの影響**
+   Q2 は Q1 より誤差が大きく、メッシュ歪みが精度を悪化させることを示す。
+   T2 の非対称歪みも T1 比で若干の精度低下をもたらす。
 
-### 5.3 Force balance verification
+3. **細分化効果**
+   Q3 および T3 は DOF 増加により誤差が縮小するが、TL のロッキングは解消されない。
 
-All cases achieve $|\text{balance error}| < 10^{-11}$, confirming that the assembly
-and boundary-condition imposition are correct.
+4. **今後の改善**
+   QH（8 節点）および TH（6 節点）の高次要素を追加実装することで、ロッキングを軽減し
+   Timoshenko 理論値に近い結果が得られることを確認する予定である。
 
 ---
 
-## 6. Output files
+## 6. 出力ファイル
 
-| File | Description |
-|------|-------------|
-| `outputs/case_<NAME>_fields.png` | Displacement magnitude + von Mises stress maps |
-| `outputs/stress_profiles.png` | $\sigma_x$ at $x=0$ and $\tau_{xy}$ at $x=L/2$ for all cases vs. theory |
-| `outputs/comparison_summary.png` | Bar charts: tip deflection, $|\sigma_x|_{\max}$, $\tau_{xy,\text{neutral}}$ |
-| `outputs/comparison_metrics.csv` | Full numerical comparison table |
+スクリプト実行時に `sec_02/2.1/2/outputs/` 以下に以下のファイルが生成される。
 
-### 6.1 CSV columns
+| ファイル | 内容 |
+|---------|------|
+| `case_<NAME>_mesh.png` | メッシュプレビュー（節点・要素番号付き） |
+| `case_<NAME>_fields.png` | 変位場・等価 von Mises 応力コンター |
+| `case_<NAME>_stress_profiles.png` | 中央断面での $\sigma_x$, $\tau_{xy}$ 分布 |
+| `comparison_summary.png` | 全ケースの先端たわみ比較棒グラフ |
+| `comparison_metrics.csv` | 全ケースの定量指標 |
 
-| Column | Description |
-|--------|-------------|
-| `case` | Case identifier (Q1–Q3, T1–T3) |
-| `element_type` | q4 or cst |
-| `mesh_type` | regular_coarse / distorted_coarse / regular_fine |
-| `dof` | Total degrees of freedom |
-| `tip_deflection_mm` | FEM tip deflection |
-| `ref_EB_mm` | Euler-Bernoulli reference |
-| `ref_timoshenko_mm` | Timoshenko reference |
-| `error_vs_timoshenko_pct` | Percentage error relative to Timoshenko |
-| `sigma_x_fixed_end_MPa` | FEM peak $|\sigma_x|$ near $x=0$ |
-| `ref_sigma_x_MPa` | Beam theory $|\sigma_x|_{\max}$ at fixed end |
-| `tau_xy_neutral_MPa` | FEM $\tau_{xy}$ near neutral axis at mid-span |
-| `ref_tau_xy_MPa` | Beam theory parabolic peak shear |
-| `max_von_mises_MPa` | Maximum von Mises stress across all elements |
-| `force_balance_error` | $|\sum F_{\text{ext}} + \sum R| / |\sum F_{\text{ext}}|$ |
-| `solve_time_s` | Wall-clock solve time in seconds |
+### 6.1 CSV 列説明
+
+| 列名 | 単位 | 説明 |
+|-----|------|------|
+| `case_name` | — | ケース識別子（例: Q1_QL） |
+| `mesh_pattern` | — | メッシュパターン（Q1〜T3） |
+| `element_version` | — | 要素バージョン（QL, TL 等） |
+| `n_elements` | — | 要素数 |
+| `n_nodes` | — | 節点数 |
+| `dof` | — | 自由度数（拘束後） |
+| `tip_deflection_mm` | mm | 自由端先端たわみ（$u_y$ 最大値） |
+| `error_vs_timoshenko_pct` | % | Timoshenko 理論値に対する相対誤差 |
+| `sigma_x_max_mpa` | MPa | 最大曲げ応力 |
+| `tau_xy_max_mpa` | MPa | 最大せん断応力 |

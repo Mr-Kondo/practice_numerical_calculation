@@ -1,17 +1,20 @@
 """Plane-stress static FEM solver for a cantilever beam (shear-bending problem).
 
 This script reproduces the example from section 2.1.2 of the textbook.
-The same boundary-value problem is solved with six mesh cases (figure 2.3):
 
-  Q4 element cases:
-    Q1 - coarse regular grid          (nx=4, ny=2)
-    Q2 - coarse distorted grid        (nx=4, ny=2, parallelogram-type distortion)
-    Q3 - fine regular grid            (nx=8, ny=4)
+The implementation is being migrated to the textbook's original separation:
 
-  CST element cases:
-    T1 - coarse grid, X-split         (nx=4, ny=2; each Q4 -> 4 CST via centroid node)
-    T2 - coarse grid, diagonal split  (nx=4, ny=2; each Q4 -> 2 CST via single diagonal)
-    T3 - fine grid, X-split           (nx=8, ny=4; each Q4 -> 4 CST via centroid node)
+    - mesh pattern (figure 2.3): Q1, Q2, Q3, T1, T2, T3
+    - element version (figure 2.2): QL, QH, TL, TH, ...
+
+This file currently implements the linear versions only:
+
+    - Q1_QL, Q2_QL, Q3_QL
+    - T1_TL, T2_TL, T3_TL
+
+The important correction is that T1/T2/T3 are now generated as direct
+triangle meshes following figure 2.3, instead of being produced by splitting
+an intermediate quadrilateral mesh afterwards.
 
 FEM results are compared against Euler-Bernoulli and Timoshenko beam theory.
 For this problem L/h = 40/10 = 4, so the shear deformation correction from
@@ -75,27 +78,30 @@ boundary_conditions: dict[str, Any] = {
     "left_edge_fixed": True,  # ux = uy = 0 on x = 0
 }
 
-# Six analysis cases matching figure 2.3 in the textbook.
+# Current implemented cases: figure 2.3 mesh patterns with linear versions.
 analysis_cases: list[dict[str, str]] = [
-    {"name": "Q1", "element_type": "q4", "mesh_type": "regular_coarse"},
-    {"name": "Q2", "element_type": "q4", "mesh_type": "distorted_coarse"},
-    {"name": "Q3", "element_type": "q4", "mesh_type": "regular_fine"},
-    {"name": "T1", "element_type": "cst", "mesh_type": "regular_coarse", "tri_split": "x_split"},
-    {"name": "T2", "element_type": "cst", "mesh_type": "regular_coarse", "tri_split": "diagonal"},
-    {"name": "T3", "element_type": "cst", "mesh_type": "regular_fine", "tri_split": "x_split"},
+    {"name": "Q1_QL", "mesh_pattern": "Q1", "element_version": "QL"},
+    {"name": "Q2_QL", "mesh_pattern": "Q2", "element_version": "QL"},
+    {"name": "Q3_QL", "mesh_pattern": "Q3", "element_version": "QL"},
+    {"name": "T1_TL", "mesh_pattern": "T1", "element_version": "TL"},
+    {"name": "T2_TL", "mesh_pattern": "T2", "element_version": "TL"},
+    {"name": "T3_TL", "mesh_pattern": "T3", "element_version": "TL"},
 ]
 
-mesh_resolutions: dict[str, dict[str, int]] = {
-    "coarse": {"nx": 4, "ny": 2},
-    "fine": {"nx": 8, "ny": 4},
+# Pattern-specific grid counts following figure 2.3.
+mesh_pattern_cfg: dict[str, dict[str, int]] = {
+    "Q1": {"nx": 4, "ny": 1},
+    "Q2": {"nx": 4, "ny": 1},
+    "Q3": {"nx": 8, "ny": 2},
+    "T1": {"nx": 4, "ny": 1},
+    "T2": {"nx": 4, "ny": 1},
+    "T3": {"nx": 8, "ny": 2},
 }
 
-# Parallelogram distortion applied to interior (non-boundary) nodes of the
-# coarse grid when mesh_type == "distorted_coarse" (case Q2).
-# Each node's x-coordinate is shifted by:
-#   dx = distortion_factor * cell_width * (j / ny)
-# where j is the node row index (0 at bottom, ny at top).
-distortion_factor: float = 0.5
+# Parallelogram distortion applied to figure 2.3 distorted patterns Q2/T2.
+distortion_factor_q2: float = 0.40
+distortion_factor_t2_top: float = 0.18
+distortion_factor_t2_bottom: float = 0.32
 
 output_options: dict[str, Any] = {
     "output_dir": "sec_02/2.1/2/outputs",
@@ -113,9 +119,12 @@ class MeshData:
     """Structured mesh and boundary metadata for the beam."""
 
     nodes: np.ndarray  # shape (N, 2)  [x, y] coordinates
-    q4_elements: np.ndarray  # shape (E, 4)  node indices per Q4 cell
+    quad_elements: np.ndarray | None  # shape (E, 4)  node indices per Q4 cell
+    tri_elements: np.ndarray | None  # shape (E, 3)  node indices per triangle
     right_edges: np.ndarray  # shape (R, 2)  edge node pairs at x = L
     fixed_nodes: np.ndarray  # shape (F,)    node indices on x = 0
+    mesh_pattern: str
+    characteristic_dx: float
 
 
 @dataclass
@@ -133,8 +142,8 @@ class CaseResult:
     """Solver outputs for a single mesh case."""
 
     case_name: str
-    element_type: str
-    mesh_type: str
+    mesh_pattern: str
+    element_version: str
     solve_time_s: float
     displacements: np.ndarray
     reactions: np.ndarray
@@ -261,79 +270,122 @@ def compute_analytical_solution(
 # ---------------------------------------------------------------------------
 
 
-def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
-    """Generate a rectangular beam mesh for the given case configuration.
-
-    Supports three mesh variants:
-      - regular_coarse / regular_fine : uniform rectangular grid
-      - distorted_coarse              : parallelogram distortion (case Q2)
-
-    For distorted_coarse, interior nodes (not on left/right boundary) have
-    their x-coordinates shifted by:
-        dx = distortion_factor * cell_width * (j / ny)
-    where j is the node row index.  This produces the parallelogram pattern
-    shown in figure 2.3 [Q2].
-
-    Args:
-        case_cfg: Dict with 'mesh_type' key.
-
-    Returns:
-        MeshData with nodes, q4_elements, right_edges, fixed_nodes.
-    """
-    mesh_type = case_cfg["mesh_type"]
-    resolution_key = "fine" if "fine" in mesh_type else "coarse"
-    nx = int(mesh_resolutions[resolution_key]["nx"])
-    ny = int(mesh_resolutions[resolution_key]["ny"])
-
+def _build_rectangular_nodes(nx: int, ny: int) -> np.ndarray:
+    """Build structured node coordinates on the beam rectangle."""
     L = float(geometry["length"])
     h = float(geometry["height"])
-
     x_coords = np.linspace(0.0, L, nx + 1)
     y_coords = np.linspace(0.0, h, ny + 1)
     xx, yy = np.meshgrid(x_coords, y_coords, indexing="xy")
-    nodes = np.column_stack((xx.ravel(), yy.ravel()))
+    return np.column_stack((xx.ravel(), yy.ravel()))
 
-    def node_id(i: int, j: int) -> int:
-        """Global node index for column i, row j (both 0-based)."""
-        return j * (nx + 1) + i
 
-    # Apply parallelogram distortion for Q2.
-    if mesh_type == "distorted_coarse":
+def _structured_node_id(nx: int, i: int, j: int) -> int:
+    """Return global node id for a structured grid."""
+    return j * (nx + 1) + i
+
+
+def _build_quad_mesh(pattern: str) -> MeshData:
+    """Build direct quadrilateral mesh patterns Q1/Q2/Q3 from figure 2.3."""
+    cfg = mesh_pattern_cfg[pattern]
+    nx = int(cfg["nx"])
+    ny = int(cfg["ny"])
+    L = float(geometry["length"])
+
+    nodes = _build_rectangular_nodes(nx, ny)
+
+    if pattern == "Q2":
         cell_w = L / nx
-        for j in range(ny + 1):
-            for i in range(nx + 1):
-                # Do not shift nodes on the left (i=0) or right (i=nx) face
-                # so that the boundary geometry remains exact.
-                if i == 0 or i == nx:
-                    continue
-                nid = node_id(i, j)
-                shift = distortion_factor * cell_w * (j / ny)
-                nodes[nid, 0] += shift
+        for i in range(1, nx):
+            bottom_id = _structured_node_id(nx, i, 0)
+            nodes[bottom_id, 0] += distortion_factor_q2 * cell_w
 
-    # Build Q4 connectivity (counter-clockwise: SW, SE, NE, NW).
-    q4_elements: list[list[int]] = []
+    quad_elements: list[list[int]] = []
     for j in range(ny):
         for i in range(nx):
-            n_sw = node_id(i, j)
-            n_se = node_id(i + 1, j)
-            n_ne = node_id(i + 1, j + 1)
-            n_nw = node_id(i, j + 1)
-            q4_elements.append([n_sw, n_se, n_ne, n_nw])
+            quad_elements.append(
+                [
+                    _structured_node_id(nx, i, j),
+                    _structured_node_id(nx, i + 1, j),
+                    _structured_node_id(nx, i + 1, j + 1),
+                    _structured_node_id(nx, i, j + 1),
+                ]
+            )
 
-    # Right-face edges for traction application (x = L).
-    right_edges: list[list[int]] = []
-    for j in range(ny):
-        right_edges.append([node_id(nx, j), node_id(nx, j + 1)])
-
-    # Fixed nodes on left face (x = 0).
-    fixed_nodes = np.array([node_id(0, j) for j in range(ny + 1)], dtype=int)
+    right_edges = np.asarray(
+        [[_structured_node_id(nx, nx, j), _structured_node_id(nx, nx, j + 1)] for j in range(ny)],
+        dtype=int,
+    )
+    fixed_nodes = np.asarray([_structured_node_id(nx, 0, j) for j in range(ny + 1)], dtype=int)
 
     return MeshData(
         nodes=nodes,
-        q4_elements=np.asarray(q4_elements, dtype=int),
-        right_edges=np.asarray(right_edges, dtype=int),
+        quad_elements=np.asarray(quad_elements, dtype=int),
+        tri_elements=None,
+        right_edges=right_edges,
         fixed_nodes=fixed_nodes,
+        mesh_pattern=pattern,
+        characteristic_dx=L / nx,
     )
+
+
+def _build_triangle_mesh(pattern: str) -> MeshData:
+    """Build direct triangle mesh patterns T1/T2/T3 from figure 2.3."""
+    cfg = mesh_pattern_cfg[pattern]
+    nx = int(cfg["nx"])
+    ny = int(cfg["ny"])
+    L = float(geometry["length"])
+    h = float(geometry["height"])
+
+    nodes = _build_rectangular_nodes(nx, ny)
+    cell_w = L / nx
+
+    if pattern == "T2":
+        for i in range(1, nx):
+            bottom_id = _structured_node_id(nx, i, 0)
+            top_id = _structured_node_id(nx, i, ny)
+            nodes[bottom_id, 0] += distortion_factor_t2_bottom * cell_w
+            nodes[top_id, 0] -= distortion_factor_t2_top * cell_w
+
+    tri_elements: list[list[int]] = []
+    for j in range(ny):
+        for i in range(nx):
+            n_sw = _structured_node_id(nx, i, j)
+            n_se = _structured_node_id(nx, i + 1, j)
+            n_ne = _structured_node_id(nx, i + 1, j + 1)
+            n_nw = _structured_node_id(nx, i, j + 1)
+
+            use_rising_diagonal = (i + j) % 2 == 0
+            if use_rising_diagonal:
+                tri_elements.append([n_sw, n_se, n_ne])
+                tri_elements.append([n_sw, n_ne, n_nw])
+            else:
+                tri_elements.append([n_sw, n_se, n_nw])
+                tri_elements.append([n_se, n_ne, n_nw])
+
+    right_edges = np.asarray(
+        [[_structured_node_id(nx, nx, j), _structured_node_id(nx, nx, j + 1)] for j in range(ny)],
+        dtype=int,
+    )
+    fixed_nodes = np.asarray([_structured_node_id(nx, 0, j) for j in range(ny + 1)], dtype=int)
+
+    return MeshData(
+        nodes=nodes,
+        quad_elements=None,
+        tri_elements=np.asarray(tri_elements, dtype=int),
+        right_edges=right_edges,
+        fixed_nodes=fixed_nodes,
+        mesh_pattern=pattern,
+        characteristic_dx=cell_w,
+    )
+
+
+def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
+    """Generate one textbook mesh pattern directly from figure 2.3."""
+    mesh_pattern = case_cfg["mesh_pattern"]
+    if mesh_pattern.startswith("Q"):
+        return _build_quad_mesh(mesh_pattern)
+    return _build_triangle_mesh(mesh_pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -534,42 +586,26 @@ def q4_to_4cst(
 
 def assemble_system(
     mesh: MeshData,
-    element_type: str,
-    tri_split: str,
+    element_version: str,
     constitutive: np.ndarray,
     thickness: float,
     traction_y: float,
 ) -> tuple[object, np.ndarray, np.ndarray, np.ndarray]:
-    """Assemble global stiffness matrix, force vector and element connectivity.
+    """Assemble global stiffness matrix and force vector for one case."""
+    nodes = mesh.nodes
 
-    For CST cases, the Q4 elements are first split into triangles using either
-    the diagonal or X-split pattern.  For the X-split, new centroid nodes are
-    appended to the node array; this extended array is returned as the second
-    element of the tuple.
-
-    Args:
-        mesh: MeshData with nodes and Q4 connectivity.
-        element_type: 'q4' or 'cst'.
-        tri_split: 'diagonal' or 'x_split' (used only when element_type='cst').
-        constitutive: 3x3 constitutive matrix.
-        thickness: Out-of-plane thickness.
-        traction_y: Right-face shear traction in N/mm^2 (negative = downward).
-
-    Returns:
-        Tuple of (stiffness CSR matrix, force vector, element connectivity,
-                  nodes array possibly extended with centroid nodes).
-    """
-    nodes = mesh.nodes.copy()
-
-    if element_type == "cst":
-        if tri_split == "x_split":
-            nodes, elements = q4_to_4cst(mesh.q4_elements, nodes)
-        else:
-            elements = q4_to_2cst(mesh.q4_elements)
+    if element_version == "TL":
+        if mesh.tri_elements is None:
+            raise ValueError(f"Triangle connectivity missing for pattern {mesh.mesh_pattern}.")
+        elements = mesh.tri_elements
         dof_per_element = 6
-    else:
-        elements = mesh.q4_elements
+    elif element_version == "QL":
+        if mesh.quad_elements is None:
+            raise ValueError(f"Quadrilateral connectivity missing for pattern {mesh.mesh_pattern}.")
+        elements = mesh.quad_elements
         dof_per_element = 8
+    else:
+        raise NotImplementedError(f"Element version {element_version} is not implemented yet.")
 
     ndof = 2 * nodes.shape[0]
     stiffness = lil_matrix((ndof, ndof), dtype=float)
@@ -577,7 +613,7 @@ def assemble_system(
 
     for conn in elements:
         coords = nodes[conn]
-        if element_type == "cst":
+        if element_version == "TL":
             ke = cst_stiffness(coords, constitutive, thickness)
         else:
             ke = q4_stiffness(coords, constitutive, thickness)
@@ -651,7 +687,7 @@ def compute_element_stress(
     elements: np.ndarray,
     displacements: np.ndarray,
     constitutive: np.ndarray,
-    element_type: str,
+    element_version: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute element-centre stress and von Mises values.
 
@@ -665,7 +701,7 @@ def compute_element_stress(
         elements: Shape (E, n_nodes_per_elem) connectivity.
         displacements: Flattened displacement vector (2N,).
         constitutive: 3x3 constitutive matrix.
-        element_type: 'cst' or 'q4'.
+        element_version: 'TL' or 'QL'.
 
     Returns:
         Tuple of (stress (E,3), centers (E,2), von_mises (E,)).
@@ -681,7 +717,7 @@ def compute_element_stress(
             ue[2 * loc_i] = displacements[2 * nid]
             ue[2 * loc_i + 1] = displacements[2 * nid + 1]
 
-        if element_type == "cst":
+        if element_version == "TL":
             b_mat, _ = cst_b_matrix(coords)
             sigma = constitutive @ (b_mat @ ue)
         else:
@@ -755,9 +791,8 @@ def solve_case(
         X-split CST cases.
     """
     case_name = case_cfg["name"]
-    element_type = case_cfg["element_type"]
-    mesh_type = case_cfg["mesh_type"]
-    tri_split = case_cfg.get("tri_split", "diagonal")
+    mesh_pattern = case_cfg["mesh_pattern"]
+    element_version = case_cfg["element_version"]
 
     thickness = float(material_props["thickness"])
     traction_y = float(loads["right_traction_y"])
@@ -765,7 +800,7 @@ def solve_case(
     mesh = generate_beam_mesh(case_cfg)
 
     start = time.perf_counter()
-    stiffness, force, elements, nodes = assemble_system(mesh, element_type, tri_split, constitutive, thickness, traction_y)
+    stiffness, force, elements, nodes = assemble_system(mesh, element_version, constitutive, thickness, traction_y)
     fixed, free = apply_boundary_conditions(mesh.fixed_nodes, nodes.shape[0])
 
     displacements = np.zeros(2 * nodes.shape[0], dtype=float)
@@ -776,7 +811,7 @@ def solve_case(
     reactions = stiffness @ displacements - force
     elapsed = time.perf_counter() - start
 
-    stress, centers, von_mises = compute_element_stress(nodes, elements, displacements, constitutive, element_type)
+    stress, centers, von_mises = compute_element_stress(nodes, elements, displacements, constitutive, element_version)
 
     # Tip deflection: mean uy of all right-face nodes in original mesh.
     right_node_ids = np.unique(mesh.right_edges.ravel())
@@ -787,7 +822,7 @@ def solve_case(
     # Cross-section stress at fixed end (x ≈ 0).
     L = float(geometry["length"])
     h = float(geometry["height"])
-    cell_w = L / mesh_resolutions["coarse" if "coarse" in mesh_type else "fine"]["nx"]
+    cell_w = mesh.characteristic_dx
     x_tol = cell_w * 0.6
 
     y_vals, sxx_vals, _ = extract_cross_section_stress(centers, stress, x_target=cell_w * 0.5, x_tol=x_tol)
@@ -832,8 +867,8 @@ def solve_case(
 
     result = CaseResult(
         case_name=case_name,
-        element_type=element_type,
-        mesh_type=mesh_type,
+        mesh_pattern=mesh_pattern,
+        element_version=element_version,
         solve_time_s=elapsed,
         displacements=displacements,
         reactions=reactions,
@@ -856,6 +891,42 @@ def solve_case(
 # ---------------------------------------------------------------------------
 # Visualization
 # ---------------------------------------------------------------------------
+
+
+def build_plot_triangles(mesh: MeshData) -> np.ndarray:
+    """Build triangle connectivity for plotting from the explicit mesh topology."""
+    if mesh.tri_elements is not None:
+        return mesh.tri_elements
+    if mesh.quad_elements is None:
+        raise ValueError(f"Mesh pattern {mesh.mesh_pattern} has no plottable connectivity.")
+
+    triangles: list[list[int]] = []
+    for n_sw, n_se, n_ne, n_nw in mesh.quad_elements:
+        triangles.append([n_sw, n_se, n_ne])
+        triangles.append([n_sw, n_ne, n_nw])
+    return np.asarray(triangles, dtype=int)
+
+
+def plot_mesh_preview(mesh: MeshData, case_name: str, output_dir: Path) -> None:
+    """Save a mesh-only preview for visual verification against figure 2.3."""
+    fig, ax = plt.subplots(figsize=(8, 2.6))
+    triangles = build_plot_triangles(mesh)
+    triang = Triangulation(mesh.nodes[:, 0], mesh.nodes[:, 1], triangles=triangles)
+
+    ax.triplot(triang, color="0.25", linewidth=1.0)
+    ax.scatter(mesh.nodes[:, 0], mesh.nodes[:, 1], s=12, color="tab:red", zorder=3)
+    ax.set_aspect("equal")
+    ax.set_title(f"Mesh preview: {case_name}")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_xlim(-1.0, float(geometry["length"]) + 1.0)
+    ax.set_ylim(-0.8, float(geometry["height"]) + 0.8)
+    fig.tight_layout()
+
+    fname = output_dir / f"case_{case_name}_mesh.png"
+    fig.savefig(fname, dpi=150)
+    plt.close(fig)
+    LOGGER.info("Saved %s", fname)
 
 
 def plot_case(
@@ -881,8 +952,8 @@ def plot_case(
     ax0.set_title("Displacement magnitude [mm]")
     ax0.set_aspect("equal")
 
-    # Triangulate for pcolor
-    triang = Triangulation(nodes[:, 0], nodes[:, 1])
+    triangles = build_plot_triangles(mesh)
+    triang = Triangulation(nodes[:, 0], nodes[:, 1], triangles=triangles)
     disp_interp = disp_magnitude[: nodes.shape[0]]
     tc0 = ax0.tripcolor(triang, disp_interp, shading="gouraud", cmap="viridis")
     plt.colorbar(tc0, ax=ax0)
@@ -898,10 +969,10 @@ def plot_case(
     cy = result.element_centers[:, 1]
     vm = result.von_mises
 
-    triang2 = Triangulation(cx, cy)
-    tc1 = ax1.tripcolor(triang2, vm, shading="flat", cmap="hot_r")
-    plt.colorbar(tc1, ax=ax1)
+    scatter = ax1.scatter(cx, cy, c=vm, cmap="hot_r", s=64, edgecolors="black", linewidths=0.35)
+    plt.colorbar(scatter, ax=ax1)
     ax1.set_xlabel("x [mm]")
+    ax1.set_ylabel("y [mm]")
 
     fig.tight_layout()
     fname = output_dir / f"case_{result.case_name}_fields.png"
@@ -948,9 +1019,8 @@ def plot_stress_profiles(
     ax1.set_ylabel("y [mm]")
 
     for res in results:
-        coarse = "coarse" in res.mesh_type
-        nx = mesh_resolutions["coarse" if coarse else "fine"]["nx"]
-        cell_w = L / nx
+        cell_w = mesh_pattern_cfg[res.mesh_pattern]["nx"]
+        cell_w = L / cell_w
         x_tol = cell_w * 0.6
 
         y0, sxx0, _ = extract_cross_section_stress(res.element_centers, res.element_stress, x_target=cell_w * 0.5, x_tol=x_tol)
@@ -1045,7 +1115,7 @@ def save_comparison(
     """
     csv_path = output_dir / "comparison_metrics.csv"
     header = (
-        "case,element_type,mesh_type,dof,"
+        "case,mesh_pattern,element_version,dof,"
         "tip_deflection_mm,ref_EB_mm,ref_timoshenko_mm,error_vs_timoshenko_pct,"
         "sigma_x_fixed_end_MPa,ref_sigma_x_MPa,"
         "tau_xy_neutral_MPa,ref_tau_xy_MPa,"
@@ -1056,7 +1126,7 @@ def save_comparison(
         ref_t = analytical.tip_deflection_timoshenko_mm
         err_t = abs(r.tip_deflection_mm - ref_t) / ref_t * 100.0 if ref_t else 0.0
         line = (
-            f"{r.case_name},{r.element_type},{r.mesh_type},{r.dof_count},"
+            f"{r.case_name},{r.mesh_pattern},{r.element_version},{r.dof_count},"
             f"{r.tip_deflection_mm:.6f},{analytical.tip_deflection_EB_mm:.6f},"
             f"{analytical.tip_deflection_timoshenko_mm:.6f},{err_t:.3f},"
             f"{r.sigma_x_fixed_end_MPa:.4f},{abs(analytical.sigma_x_fixed_end_MPa):.4f},"
@@ -1075,7 +1145,7 @@ def save_comparison(
 
 
 def run() -> None:
-    """Execute all six FEM cases, save plots, CSV and log summary table."""
+    """Execute all currently implemented FEM cases and save outputs."""
     output_dir = Path(output_options["output_dir"]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     LOGGER.info("Output directory ready: %s", output_dir)
@@ -1111,6 +1181,7 @@ def run() -> None:
     # Per-case field plots
     if output_options.get("plot_case_fields", True):
         for mesh, result, nodes_used in zip(meshes, results, nodes_per_case):
+            plot_mesh_preview(mesh, result.case_name, output_dir)
             plot_case(mesh, nodes_used, result, output_dir)
 
     # Cross-section stress profiles
@@ -1123,13 +1194,13 @@ def run() -> None:
     save_comparison(results, analytical, output_dir)
 
     # Console summary table
-    header_fmt = f"{'Case':<12}{'EType':<6}{'Mesh':<18}{'DOF':>6}  {'Tip[mm]':>10}  {'Err_T%':>8}  {'SxxMax':>8}  {'TauN':>8}  {'Balance':>10}  {'t[s]':>7}"
+    header_fmt = f"{'Case':<12}{'Pattern':<8}{'Ver':<6}{'DOF':>6}  {'Tip[mm]':>10}  {'Err_T%':>8}  {'SxxMax':>8}  {'TauN':>8}  {'Balance':>10}  {'t[s]':>7}"
     LOGGER.info("Summary:\n%s", header_fmt)
     for r in results:
         ref_t = analytical.tip_deflection_timoshenko_mm
         err = abs(r.tip_deflection_mm - ref_t) / ref_t * 100.0 if ref_t else 0.0
         row = (
-            f"{r.case_name:<12}{r.element_type:<6}{r.mesh_type:<18}{r.dof_count:>6}  "
+            f"{r.case_name:<12}{r.mesh_pattern:<8}{r.element_version:<6}{r.dof_count:>6}  "
             f"{r.tip_deflection_mm:>10.6f}  {err:>8.3f}  "
             f"{r.sigma_x_fixed_end_MPa:>8.4f}  {r.tau_xy_neutral_axis_MPa:>8.4f}  "
             f"{r.force_balance_error:>10.2e}  {r.solve_time_s:>7.4f}"
