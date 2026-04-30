@@ -1,0 +1,7 @@
+case,element_type,mesh_type,dof,tip_deflection_mm,ref_EB_mm,ref_timoshenko_mm,error_vs_timoshenko_pct,sigma_x_fixed_end_MPa,ref_sigma_x_MPa,tau_xy_neutral_MPa,ref_tau_xy_MPa,max_von_mises_MPa,force_balance_error,solve_time_s
+Q1,q4,regular_coarse,30,0.062430,0.085333,0.089493,30.240,7.5934,24.0000,1.0000,1.5000,7.3456,1.9664e-13,0.0111
+Q2,q4,distorted_coarse,30,0.048021,0.085333,0.089493,46.341,5.6057,24.0000,0.5335,1.5000,6.8206,1.4886e-13,0.0016
+Q3,q4,regular_fine,90,0.080206,0.085333,0.089493,10.378,15.4046,24.0000,1.3414,1.5000,14.6155,1.2612e-14,0.0052
+T1,cst,regular_coarse,46,0.056104,0.085333,0.089493,37.310,12.6760,24.0000,1.7431,1.5000,13.3979,4.7198e-13,0.0029
+T2,cst,regular_coarse,30,0.034169,0.085333,0.089493,61.820,8.2736,24.0000,1.6802,1.5000,10.0675,3.1228e-13,0.0013
+T3,cst,regular_fine,154,0.077308,0.085333,0.089493,13.616,19.4921,24.0000,1.4568,1.5000,19.3849,2.5498e-12,0.0082
