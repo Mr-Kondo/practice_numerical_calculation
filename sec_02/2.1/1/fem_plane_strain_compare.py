@@ -65,6 +65,19 @@ output_options: dict[str, Any] = {
     "displacement_scale": 8.0,
 }
 
+# Post-processing configuration for regional stress evaluation.
+# Note: a point constraint (single-node Dirichlet condition, e.g. uy=0 at the anchor)
+# can produce an artificial local stress concentration. This is a numerical artifact
+# of the discrete boundary condition, not a physical feature of the structure.
+# Evaluating the maximum stress while excluding the anchor neighbourhood provides
+# a more reliable comparison between element formulations.
+post_processing: dict[str, float] = {
+    "anchor_exclusion_radius_mm": 10.0,  # exclude elements within this radius of anchor
+    "opening_corner_radius_mm": 10.0,  # evaluate elements within this radius of opening corner
+    "opening_corner_x": 60.0,  # x-coordinate of opening top-right corner [mm]
+    "opening_corner_y": 80.0,  # y-coordinate of opening top-right corner [mm]
+}
+
 
 @dataclass
 class MeshData:
@@ -95,6 +108,12 @@ class CaseResult:
     max_disp: float
     max_von_mises: float
     force_balance_error: float
+    # Regional stress metrics for post-processing interpretation.
+    # max_von_mises_global equals max_von_mises; both are retained so that
+    # existing comparisons continue to work alongside the new columns.
+    max_von_mises_global: float
+    max_von_mises_excluding_anchor: float
+    max_von_mises_near_opening_corner: float
 
 
 def plane_strain_matrix(young: float, poisson: float) -> np.ndarray:
@@ -356,7 +375,12 @@ def apply_boundary_conditions(mesh: MeshData) -> tuple[np.ndarray, np.ndarray]:
     return fixed, free
 
 
-def solve_case(mesh: MeshData, case_cfg: dict[str, str], constitutive: np.ndarray) -> CaseResult:
+def solve_case(
+    mesh: MeshData,
+    case_cfg: dict[str, str],
+    constitutive: np.ndarray,
+    anchor_coords: np.ndarray,
+) -> CaseResult:
     """Solve one FEM case and compute stress/reaction metrics."""
 
     element_type = case_cfg["element_type"]
@@ -378,6 +402,10 @@ def solve_case(mesh: MeshData, case_cfg: dict[str, str], constitutive: np.ndarra
     elapsed = time.perf_counter() - start
 
     stress, centers, von_mises = compute_element_stress(mesh.nodes, elements, displacements, constitutive, element_type)
+
+    vm_global, vm_excl_anchor, vm_near_corner = compute_regional_stress_metrics(
+        centers, von_mises, anchor_coords, post_processing
+    )
 
     uy_reaction = reactions[2 * mesh.anchor_node + 1]
     external_fy = float(np.sum(force[1::2]))
@@ -401,6 +429,9 @@ def solve_case(mesh: MeshData, case_cfg: dict[str, str], constitutive: np.ndarra
         max_disp=max_disp,
         max_von_mises=float(np.max(von_mises)),
         force_balance_error=float(balance_error),
+        max_von_mises_global=vm_global,
+        max_von_mises_excluding_anchor=vm_excl_anchor,
+        max_von_mises_near_opening_corner=vm_near_corner,
     )
 
 
@@ -487,6 +518,79 @@ def compute_element_stress(
         vm_list.append(vm)
 
     return np.asarray(elem_stress), np.asarray(centers), np.asarray(vm_list)
+
+
+def compute_regional_stress_metrics(
+    element_centers: np.ndarray,
+    von_mises: np.ndarray,
+    anchor_coords: np.ndarray,
+    post_cfg: dict[str, float],
+) -> tuple[float, float, float]:
+    """Compute regional von Mises stress metrics for post-processing evaluation.
+
+    Point constraints (single-node Dirichlet conditions such as the uy=0 anchor)
+    can produce artificial local stress concentrations. These are a numerical
+    artifact of the discrete boundary condition, not a physical feature of the
+    structure. CST and Q4 handle this artifact differently, so the raw global
+    maximum may reflect element-type sensitivity rather than structural behaviour.
+
+    Evaluating the maximum stress while excluding the anchor neighbourhood, and
+    additionally evaluating stress near the opening corner, gives a more
+    physically meaningful comparison between element formulations.
+
+    Args:
+        element_centers: Array of shape (N, 2) with element centroid coordinates.
+        von_mises: Array of shape (N,) with element von Mises stresses in MPa.
+        anchor_coords: Shape (2,) array with anchor node (x, y) coordinates in mm.
+        post_cfg: Post-processing configuration dict with keys:
+            - anchor_exclusion_radius_mm
+            - opening_corner_radius_mm
+            - opening_corner_x
+            - opening_corner_y
+
+    Returns:
+        Tuple of (vm_global_max, vm_excl_anchor_max, vm_near_corner_max) in MPa.
+        vm_near_corner_max is 0.0 if no elements fall within the evaluation radius.
+    """
+    excl_radius = float(post_cfg["anchor_exclusion_radius_mm"])
+    corner_radius = float(post_cfg["opening_corner_radius_mm"])
+    corner_x = float(post_cfg["opening_corner_x"])
+    corner_y = float(post_cfg["opening_corner_y"])
+
+    # Global maximum over all elements (may include anchor stress artifact).
+    vm_global_max = float(np.max(von_mises))
+
+    # Distance from each element centre to the anchor node.
+    # Elements inside the exclusion radius are omitted from the comparison
+    # because the point constraint (uy=0) produces an artificial stress peak.
+    dist_to_anchor = np.linalg.norm(element_centers - anchor_coords, axis=1)
+    mask_excl = dist_to_anchor > excl_radius
+    if np.any(mask_excl):
+        vm_excl_anchor_max = float(np.max(von_mises[mask_excl]))
+    else:
+        LOGGER.warning(
+            "All elements fall within anchor exclusion radius (%.1f mm). Returning global max for anchor-excluded metric.",
+            excl_radius,
+        )
+        vm_excl_anchor_max = vm_global_max
+
+    # Distance from each element centre to the opening top-right corner.
+    # Only elements within the evaluation radius are considered.
+    corner_coords = np.array([corner_x, corner_y], dtype=float)
+    dist_to_corner = np.linalg.norm(element_centers - corner_coords, axis=1)
+    mask_corner = dist_to_corner <= corner_radius
+    if np.any(mask_corner):
+        vm_near_corner_max = float(np.max(von_mises[mask_corner]))
+    else:
+        LOGGER.warning(
+            "No elements found within opening corner evaluation radius (%.1f mm) around (%.1f, %.1f). Returning 0.0.",
+            corner_radius,
+            corner_x,
+            corner_y,
+        )
+        vm_near_corner_max = 0.0
+
+    return vm_global_max, vm_excl_anchor_max, vm_near_corner_max
 
 
 def build_plot_triangles(elements: np.ndarray, element_type: str) -> tuple[np.ndarray, np.ndarray]:
@@ -630,6 +734,11 @@ def save_comparison(results: list[CaseResult], output_dir: Path) -> None:
                 "element_type",
                 "max_disp_mm",
                 "max_von_mises_MPa",
+                "max_von_mises_global_MPa",
+                "max_von_mises_excluding_anchor_MPa",
+                "max_von_mises_near_opening_corner_MPa",
+                "anchor_exclusion_radius_mm",
+                "opening_corner_radius_mm",
                 "force_balance_error",
                 "dof",
                 "solve_time_s",
@@ -642,6 +751,11 @@ def save_comparison(results: list[CaseResult], output_dir: Path) -> None:
                     item.element_type,
                     item.max_disp,
                     item.max_von_mises,
+                    item.max_von_mises_global,
+                    item.max_von_mises_excluding_anchor,
+                    item.max_von_mises_near_opening_corner,
+                    post_processing["anchor_exclusion_radius_mm"],
+                    post_processing["opening_corner_radius_mm"],
                     item.force_balance_error,
                     item.dof_count,
                     item.solve_time_s,
@@ -693,10 +807,18 @@ def run() -> None:
         mesh.top_edges.shape[0],
     )
 
+    anchor_coords = mesh.nodes[mesh.anchor_node]
+    LOGGER.info(
+        "Anchor node index=%d, coordinates=(%.3f, %.3f) mm  [point constraint uy=0; may produce artificial local stress peak]",
+        mesh.anchor_node,
+        float(anchor_coords[0]),
+        float(anchor_coords[1]),
+    )
+
     results: list[CaseResult] = []
     for case in analysis_cases:
         LOGGER.info("Running case: %s", case["name"])
-        result = solve_case(mesh, case, constitutive)
+        result = solve_case(mesh, case, constitutive, anchor_coords)
         results.append(result)
 
         save_nodal_csv(mesh.nodes, result.displacements, output_dir / f"nodal_displacement_{result.case_name}.csv")
