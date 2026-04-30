@@ -79,7 +79,7 @@ boundary_conditions: dict[str, Any] = {
     "left_edge_fixed": True,  # ux = uy = 0 on x = 0
 }
 
-# Current implemented cases: figure 2.3 mesh patterns with linear and QH versions.
+# Current implemented cases: figure 2.3 mesh patterns with linear, QH, and TH versions.
 analysis_cases: list[dict[str, str]] = [
     {"name": "Q1_QL", "mesh_pattern": "Q1", "element_version": "QL"},
     {"name": "Q2_QL", "mesh_pattern": "Q2", "element_version": "QL"},
@@ -90,6 +90,9 @@ analysis_cases: list[dict[str, str]] = [
     {"name": "T1_TL", "mesh_pattern": "T1", "element_version": "TL"},
     {"name": "T2_TL", "mesh_pattern": "T2", "element_version": "TL"},
     {"name": "T3_TL", "mesh_pattern": "T3", "element_version": "TL"},
+    {"name": "T1_TH", "mesh_pattern": "T1", "element_version": "TH"},
+    {"name": "T2_TH", "mesh_pattern": "T2", "element_version": "TH"},
+    {"name": "T3_TH", "mesh_pattern": "T3", "element_version": "TH"},
 ]
 
 # Pattern-specific grid counts following figure 2.3.
@@ -130,6 +133,7 @@ class MeshData:
     mesh_pattern: str
     characteristic_dx: float
     q8_elements: np.ndarray | None = None  # shape (E, 8)  node indices per Q8 cell
+    t6_elements: np.ndarray | None = None  # shape (E, 6)  node indices per T6 cell
     right_edge_midnodes: np.ndarray | None = None  # shape (R,)  midside node per right edge
 
 
@@ -389,8 +393,8 @@ def _build_triangle_mesh(pattern: str) -> MeshData:
 def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
     """Generate one textbook mesh pattern directly from figure 2.3.
 
-    For QH element version the base Q4 mesh is enriched with midside nodes
-    to produce a Q8 (serendipity) mesh.
+    For QH the base Q4 mesh is enriched with midside nodes to produce Q8.
+    For TH the base TL mesh is enriched with midside nodes to produce T6.
     """
     mesh_pattern = case_cfg["mesh_pattern"]
     element_version = case_cfg["element_version"]
@@ -399,7 +403,10 @@ def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
         if element_version == "QH":
             return enrich_q4_to_q8(base_mesh)
         return base_mesh
-    return _build_triangle_mesh(mesh_pattern)
+    base_mesh = _build_triangle_mesh(mesh_pattern)
+    if element_version == "TH":
+        return enrich_tri3_to_tri6(base_mesh)
+    return base_mesh
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +478,83 @@ def enrich_q4_to_q8(mesh: MeshData) -> MeshData:
         quad_elements=mesh.quad_elements,
         tri_elements=None,
         q8_elements=np.asarray(q8_list, dtype=int),
+        right_edges=mesh.right_edges,
+        right_edge_midnodes=np.asarray(right_mid, dtype=int),
+        fixed_nodes=new_fixed,
+        mesh_pattern=mesh.mesh_pattern,
+        characteristic_dx=mesh.characteristic_dx,
+    )
+
+
+# ---------------------------------------------------------------------------
+# T6 mesh enrichment
+# ---------------------------------------------------------------------------
+
+
+def enrich_tri3_to_tri6(mesh: MeshData) -> MeshData:
+    """Add midside nodes to a TL mesh to produce a T6 (quadratic triangle) mesh.
+
+    Each edge shared between two triangles gets exactly one midside node.
+    Right-face and left-face boundary edges are handled so traction and
+    constraint DOFs are consistent.
+
+    Node ordering in each T6 element:
+        [n1, n2, n3, m12, m23, m31]
+    where m12 is the midpoint of edge n1-n2, etc.
+
+    Args:
+        mesh: TL MeshData (must have tri_elements set).
+
+    Returns:
+        New MeshData with extended nodes, t6_elements, right_edge_midnodes,
+        and fixed_nodes augmented by left-edge midside nodes.
+
+    Raises:
+        ValueError: If mesh has no triangle connectivity.
+    """
+    if mesh.tri_elements is None:
+        raise ValueError("enrich_tri3_to_tri6 requires tri_elements to be set.")
+
+    new_nodes: list[np.ndarray] = list(mesh.nodes)
+    edge_to_midnode: dict[tuple[int, int], int] = {}
+
+    def get_midnode(n1: int, n2: int) -> int:
+        """Return (creating if needed) the midside node index for edge (n1,n2)."""
+        key = (min(n1, n2), max(n1, n2))
+        if key not in edge_to_midnode:
+            mid = (mesh.nodes[n1] + mesh.nodes[n2]) * 0.5
+            idx = len(new_nodes)
+            new_nodes.append(mid)
+            edge_to_midnode[key] = idx
+        return edge_to_midnode[key]
+
+    # Build T6 connectivity.  TL ordering: [n1, n2, n3]
+    t6_list: list[list[int]] = []
+    for conn in mesh.tri_elements:
+        n1, n2, n3 = int(conn[0]), int(conn[1]), int(conn[2])
+        m12 = get_midnode(n1, n2)
+        m23 = get_midnode(n2, n3)
+        m31 = get_midnode(n3, n1)
+        t6_list.append([n1, n2, n3, m12, m23, m31])
+
+    # Right-edge midside nodes (one per original right edge pair).
+    right_mid: list[int] = []
+    for n1, n2 in mesh.right_edges:
+        right_mid.append(get_midnode(int(n1), int(n2)))
+
+    # Fixed (left-edge) midside nodes.
+    sorted_fixed = np.sort(mesh.fixed_nodes)
+    left_mid: list[int] = []
+    for i in range(len(sorted_fixed) - 1):
+        left_mid.append(get_midnode(int(sorted_fixed[i]), int(sorted_fixed[i + 1])))
+
+    new_fixed = np.concatenate([mesh.fixed_nodes, np.asarray(left_mid, dtype=int)])
+
+    return MeshData(
+        nodes=np.asarray(new_nodes, dtype=float),
+        quad_elements=None,
+        tri_elements=mesh.tri_elements,
+        t6_elements=np.asarray(t6_list, dtype=int),
         right_edges=mesh.right_edges,
         right_edge_midnodes=np.asarray(right_mid, dtype=int),
         fixed_nodes=new_fixed,
@@ -744,6 +828,132 @@ def q8_stiffness(coords: np.ndarray, constitutive: np.ndarray, thickness: float)
 
 
 # ---------------------------------------------------------------------------
+# T6 quadratic triangle element functions
+# ---------------------------------------------------------------------------
+
+
+def t6_shape_derivatives(L1: float, L2: float) -> np.ndarray:
+    """Return shape function derivatives dN/d(L1,L2) for T6 in area coordinates.
+
+    Node ordering (matches enrich_tri3_to_tri6):
+        0: n1 (corner, L1=1, L2=0, L3=0)
+        1: n2 (corner, L1=0, L2=1, L3=0)
+        2: n3 (corner, L1=0, L2=0, L3=1)
+        3: m12 (midside n1-n2, L1=L2=0.5)
+        4: m23 (midside n2-n3, L2=L3=0.5)
+        5: m31 (midside n3-n1, L3=L1=0.5)
+
+    With L3 = 1 - L1 - L2, independent variables are L1 and L2.
+
+    Shape functions:
+        N0 = L1(2L1 - 1),  N1 = L2(2L2 - 1),  N2 = L3(2L3 - 1)
+        N3 = 4 L1 L2,      N4 = 4 L2 L3,       N5 = 4 L1 L3
+
+    Args:
+        L1: First area coordinate.
+        L2: Second area coordinate.
+
+    Returns:
+        Shape (6, 2) array; row i is [dNi/dL1, dNi/dL2].
+    """
+    L3 = 1.0 - L1 - L2
+    dN = np.zeros((6, 2), dtype=float)
+
+    # Corner node 0: N0 = L1(2L1 - 1)
+    dN[0, 0] = 4.0 * L1 - 1.0
+    dN[0, 1] = 0.0
+
+    # Corner node 1: N1 = L2(2L2 - 1)
+    dN[1, 0] = 0.0
+    dN[1, 1] = 4.0 * L2 - 1.0
+
+    # Corner node 2: N2 = L3(2L3 - 1), L3 = 1 - L1 - L2
+    #   dN2/dL1 = (4L3 - 1) * (-1) = 1 - 4L3
+    #   dN2/dL2 = (4L3 - 1) * (-1) = 1 - 4L3
+    dN[2, 0] = 1.0 - 4.0 * L3
+    dN[2, 1] = 1.0 - 4.0 * L3
+
+    # Midside node 3: N3 = 4 L1 L2
+    dN[3, 0] = 4.0 * L2
+    dN[3, 1] = 4.0 * L1
+
+    # Midside node 4: N4 = 4 L2 L3 = 4 L2 (1 - L1 - L2)
+    dN[4, 0] = -4.0 * L2
+    dN[4, 1] = 4.0 * (L3 - L2)
+
+    # Midside node 5: N5 = 4 L1 L3 = 4 L1 (1 - L1 - L2)
+    dN[5, 0] = 4.0 * (L3 - L1)
+    dN[5, 1] = -4.0 * L1
+
+    return dN
+
+
+def t6_b_matrix(coords: np.ndarray, L1: float, L2: float) -> tuple[np.ndarray, float]:
+    """Build T6 strain-displacement matrix and Jacobian determinant.
+
+    The Jacobian maps from area coordinates (L1, L2) to physical (x, y):
+        J = dN^T @ coords   (shape 2x2)
+
+    Args:
+        coords: Shape (6, 2) node coordinates in T6 ordering.
+        L1, L2: Area coordinates; L3 = 1 - L1 - L2.
+
+    Returns:
+        Tuple of (B matrix (3x12), det(J)).
+    """
+    dnd_natural = t6_shape_derivatives(L1, L2)  # (6, 2)
+    # Same convention as q4_b_matrix: jacobian = coords.T @ dN/d(natural) = J^T.
+    # Then inv_j = (J^T)^{-1} = J^{-T}, and dnd_global = dnd_natural @ inv_j
+    # correctly yields dNi/dx, dNi/dy via the chain rule.
+    jacobian = coords.T @ dnd_natural  # (2, 2) = J^T
+    det_j = float(np.linalg.det(jacobian))
+    if det_j <= 0.0:
+        raise ValueError(f"Invalid T6 Jacobian (det={det_j:.6e}). Check mesh distortion.")
+
+    inv_j = np.linalg.inv(jacobian)
+    dnd_global = dnd_natural @ inv_j  # (6, 2)
+
+    b_mat = np.zeros((3, 12), dtype=float)
+    for i in range(6):
+        dnx = dnd_global[i, 0]
+        dny = dnd_global[i, 1]
+        base = 2 * i
+        b_mat[0, base] = dnx
+        b_mat[1, base + 1] = dny
+        b_mat[2, base] = dny
+        b_mat[2, base + 1] = dnx
+
+    return b_mat, det_j
+
+
+def t6_stiffness(coords: np.ndarray, constitutive: np.ndarray, thickness: float) -> np.ndarray:
+    """Compute 12x12 T6 element stiffness matrix using 3-point Gauss integration.
+
+    Uses the standard 3-point rule on the reference triangle (degree 2 exactness):
+        points (L1, L2): (1/6, 1/6), (2/3, 1/6), (1/6, 2/3)
+        weights: 1/6 each  (sum = 1/2 = area of reference triangle)
+
+    K_e = t * sum_gp [ w * B^T D B * det(J) ]
+
+    Args:
+        coords: Shape (6, 2) node coordinates.
+        constitutive: 3x3 constitutive matrix.
+        thickness: Out-of-plane thickness b.
+
+    Returns:
+        12x12 stiffness matrix.
+    """
+    a = 1.0 / 6.0
+    b = 2.0 / 3.0
+    gauss_points = [(a, a, a), (b, a, a), (a, b, a)]  # (L1, L2, weight)
+    ke = np.zeros((12, 12), dtype=float)
+    for L1, L2, w in gauss_points:
+        b_mat, det_j = t6_b_matrix(coords, L1, L2)
+        ke += thickness * w * (b_mat.T @ constitutive @ b_mat) * det_j
+    return ke
+
+
+# ---------------------------------------------------------------------------
 # CST splitting utilities
 # ---------------------------------------------------------------------------
 
@@ -832,6 +1042,11 @@ def assemble_system(
             raise ValueError(f"Q8 connectivity missing for pattern {mesh.mesh_pattern}.")
         elements = mesh.q8_elements
         dof_per_element = 16
+    elif element_version == "TH":
+        if mesh.t6_elements is None:
+            raise ValueError(f"T6 connectivity missing for pattern {mesh.mesh_pattern}.")
+        elements = mesh.t6_elements
+        dof_per_element = 12
     else:
         raise NotImplementedError(f"Element version {element_version} is not implemented yet.")
 
@@ -845,8 +1060,10 @@ def assemble_system(
             ke = cst_stiffness(coords, constitutive, thickness)
         elif element_version == "QL":
             ke = q4_stiffness(coords, constitutive, thickness)
-        else:
+        elif element_version == "QH":
             ke = q8_stiffness(coords, constitutive, thickness)
+        else:
+            ke = t6_stiffness(coords, constitutive, thickness)
 
         dofs = np.zeros(dof_per_element, dtype=int)
         for local_idx, nid in enumerate(conn):
@@ -859,12 +1076,13 @@ def assemble_system(
 
     # Apply right-face shear traction as equivalent nodal forces.
     # For QL/TL: uniform traction on a linear edge -> each corner node gets L/2.
-    # For QH: quadratic edge with 3 nodes -> consistent nodal forces [1/6, 2/3, 1/6]*L.
+    # For QH/TH: quadratic edge with 3 nodes -> consistent nodal forces [1/6, 2/3, 1/6]*L.
+    use_quadratic_edge = element_version in ("QH", "TH")
     for edge_idx, (n1, n2) in enumerate(mesh.right_edges):
         x1, y1 = mesh.nodes[n1]
         x2, y2 = mesh.nodes[n2]
         edge_length = float(np.hypot(x2 - x1, y2 - y1))
-        if element_version == "QH" and mesh.right_edge_midnodes is not None:
+        if use_quadratic_edge and mesh.right_edge_midnodes is not None:
             # Consistent nodal force for 3-node quadratic edge under uniform traction.
             n_mid = int(mesh.right_edge_midnodes[edge_idx])
             force[2 * n1 + 1] += traction_y * thickness * edge_length / 6.0
@@ -939,7 +1157,7 @@ def compute_element_stress(
         elements: Shape (E, n_nodes_per_elem) connectivity.
         displacements: Flattened displacement vector (2N,).
         constitutive: 3x3 constitutive matrix.
-        element_version: 'TL' or 'QL'.
+        element_version: 'TL', 'QL', 'QH', or 'TH'.
 
     Returns:
         Tuple of (stress (E,3), centers (E,2), von_mises (E,)).
@@ -966,8 +1184,8 @@ def compute_element_stress(
                 b_mat, _ = q4_b_matrix(coords, xi, eta)
                 sigmas.append(constitutive @ (b_mat @ ue))
             sigma = np.mean(np.asarray(sigmas), axis=0)
-        else:
-            # QH: average stress over 2x2 Gauss points (sufficient for stress output)
+        elif element_version == "QH":
+            # Average stress over 2x2 Gauss points (sufficient for stress output).
             g = 1.0 / np.sqrt(3.0)
             gp_qh = [(-g, -g), (g, -g), (g, g), (-g, g)]
             sigmas = []
@@ -975,6 +1193,10 @@ def compute_element_stress(
                 b_mat, _ = q8_b_matrix(coords, xi, eta)
                 sigmas.append(constitutive @ (b_mat @ ue))
             sigma = np.mean(np.asarray(sigmas), axis=0)
+        else:
+            # TH: evaluate at element centroid (L1 = L2 = L3 = 1/3).
+            b_mat, _ = t6_b_matrix(coords, 1.0 / 3.0, 1.0 / 3.0)
+            sigma = constitutive @ (b_mat @ ue)
 
         sxx, syy, txy = float(sigma[0]), float(sigma[1]), float(sigma[2])
         vm = von_mises_plane_stress(sxx, syy, txy)
