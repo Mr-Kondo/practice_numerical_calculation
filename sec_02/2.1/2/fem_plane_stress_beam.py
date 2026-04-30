@@ -99,10 +99,10 @@ analysis_cases: list[dict[str, str]] = [
 mesh_pattern_cfg: dict[str, dict[str, int]] = {
     "Q1": {"nx": 4, "ny": 1},
     "Q2": {"nx": 4, "ny": 1},
-    "Q3": {"nx": 16, "ny": 4},
+    "Q3": {"nx": 64, "ny": 16},
     "T1": {"nx": 4, "ny": 1},
     "T2": {"nx": 4, "ny": 1},
-    "T3": {"nx": 16, "ny": 4},
+    "T3": {"nx": 64, "ny": 16},
 }
 
 # Parallelogram distortion applied to figure 2.3 distorted patterns Q2/T2.
