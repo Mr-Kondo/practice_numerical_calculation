@@ -162,7 +162,36 @@ B02 では `FVM` と `SPH` の比較を主軸にします。
 
 この実験を再現するには、まず依存関係を同期します。通常は `uv sync` を実行し、GPU版（PyTorch）も使う場合は `uv sync --extra gpu` を選びます。
 
-2つの実験をまとめて実行する場合は、プロジェクトルートで `uv run sec01-run-all` を実行します。
-個別に実行する場合は、実験1が `uv run sec01-b01`、実験2が `uv run sec01-b02` です。
+### 実行コマンド
 
-実行結果は、それぞれ `sec_01/outputs/B01` と `sec_01/outputs/B02` に保存されます。
+| 目的 | コマンド |
+|------|----------|
+| 全体実行（計算 + 可視化） | `uv run sec01-run-all` |
+| B01 のみ実行 | `uv run sec01-b01` |
+| B02 のみ実行 | `uv run sec01-b02` |
+| B01 可視化のみ再生成 | `uv run sec01-plot-b01` |
+| B02 可視化のみ再生成 | `uv run sec01-plot-b02` |
+| B01 アニメーションのみ再生成 | `uv run sec01-animate-b01` |
+| B02 アニメーションのみ再生成 | `uv run sec01-animate-b02` |
+
+B02 の比較対象は `FVM` と `SPH` です。B02 では `FEM` は実行しません。
+
+`uv run sec01-animate-b02` は B02 の標準 side-view timeseries（FVM vs SPH）を出力します。
+
+### 主な出力先
+
+```
+sec_01/outputs/B01/B01_metrics.csv
+sec_01/outputs/B02/B02_metrics.csv
+sec_01/outputs/B01/figs/
+sec_01/outputs/B02/figs/
+sec_01/outputs/B01/animations/
+sec_01/outputs/B02/animations/
+```
+
+B02 の主なアニメーション出力:
+
+```
+sec_01/outputs/B02/animations/B02_timeseries.gif
+sec_01/outputs/B02/animations/B02_timeseries.mp4
+```

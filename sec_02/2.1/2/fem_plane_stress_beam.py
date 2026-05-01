@@ -47,7 +47,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.tri import Triangulation
-from scipy.sparse import lil_matrix
+from scipy.sparse import csr_matrix, lil_matrix
 from scipy.sparse.linalg import spsolve
 
 LOGGER = logging.getLogger(__name__)
@@ -73,10 +73,6 @@ loads: dict[str, float] = {
     # Uniform shear traction on the right face (downward).
     # tau = P / A = 1 N/mm^2  =>  P = 10 N
     "right_traction_y": -1.0,
-}
-
-boundary_conditions: dict[str, Any] = {
-    "left_edge_fixed": True,  # ux = uy = 0 on x = 0
 }
 
 # Current implemented cases: figure 2.3 mesh patterns with linear, QH, and TH versions.
@@ -113,6 +109,7 @@ distortion_factor_t2_bottom: float = 0.32
 output_options: dict[str, Any] = {
     "output_dir": "sec_02/2.1/2/outputs",
     "displacement_scale": 500.0,
+    "plot_case_fields": True,  # set to False to skip per-case combined plots
 }
 
 
@@ -246,7 +243,7 @@ def compute_analytical_solution(
     nu = float(mat["nu"])
 
     A = b * h
-    I = b * h**3 / 12.0
+    moment_of_inertia = b * h**3 / 12.0
     G = E / (2.0 * (1.0 + nu))
     kappa = 5.0 / 6.0  # shear correction factor for rectangular section
 
@@ -254,11 +251,11 @@ def compute_analytical_solution(
     # right_traction_y is negative (downward) => P = |tau| * A
     P = abs(float(load["right_traction_y"])) * A
 
-    delta_EB = P * L**3 / (3.0 * E * I)
+    delta_EB = P * L**3 / (3.0 * E * moment_of_inertia)
     delta_timoshenko = delta_EB + P * L / (kappa * G * A)
 
-    sigma_x_max = P * L * (h / 2.0) / I
-    tau_xy_max = P * h**2 / (8.0 * I)
+    sigma_x_max = P * L * (h / 2.0) / moment_of_inertia
+    tau_xy_max = P * h**2 / (8.0 * moment_of_inertia)
 
     LOGGER.info(
         "Analytical solution: delta_EB=%.6f mm, delta_T=%.6f mm, sigma_x=%.4f MPa, tau_xy=%.4f MPa",
@@ -281,12 +278,10 @@ def compute_analytical_solution(
 # ---------------------------------------------------------------------------
 
 
-def _build_rectangular_nodes(nx: int, ny: int) -> np.ndarray:
+def _build_rectangular_nodes(nx: int, ny: int, length: float, height: float) -> np.ndarray:
     """Build structured node coordinates on the beam rectangle."""
-    L = float(geometry["length"])
-    h = float(geometry["height"])
-    x_coords = np.linspace(0.0, L, nx + 1)
-    y_coords = np.linspace(0.0, h, ny + 1)
+    x_coords = np.linspace(0.0, length, nx + 1)
+    y_coords = np.linspace(0.0, height, ny + 1)
     xx, yy = np.meshgrid(x_coords, y_coords, indexing="xy")
     return np.column_stack((xx.ravel(), yy.ravel()))
 
@@ -296,14 +291,14 @@ def _structured_node_id(nx: int, i: int, j: int) -> int:
     return j * (nx + 1) + i
 
 
-def _build_quad_mesh(pattern: str) -> MeshData:
+def _build_quad_mesh(pattern: str, length: float, height: float) -> MeshData:
     """Build direct quadrilateral mesh patterns Q1/Q2/Q3 from figure 2.3."""
     cfg = mesh_pattern_cfg[pattern]
     nx = int(cfg["nx"])
     ny = int(cfg["ny"])
-    L = float(geometry["length"])
+    L = length
 
-    nodes = _build_rectangular_nodes(nx, ny)
+    nodes = _build_rectangular_nodes(nx, ny, length, height)
 
     if pattern == "Q2":
         cell_w = L / nx
@@ -340,15 +335,14 @@ def _build_quad_mesh(pattern: str) -> MeshData:
     )
 
 
-def _build_triangle_mesh(pattern: str) -> MeshData:
+def _build_triangle_mesh(pattern: str, length: float, height: float) -> MeshData:
     """Build direct triangle mesh patterns T1/T2/T3 from figure 2.3."""
     cfg = mesh_pattern_cfg[pattern]
     nx = int(cfg["nx"])
     ny = int(cfg["ny"])
-    L = float(geometry["length"])
-    h = float(geometry["height"])
+    L = length
 
-    nodes = _build_rectangular_nodes(nx, ny)
+    nodes = _build_rectangular_nodes(nx, ny, length, height)
     cell_w = L / nx
 
     if pattern == "T2":
@@ -391,7 +385,7 @@ def _build_triangle_mesh(pattern: str) -> MeshData:
     )
 
 
-def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
+def generate_beam_mesh(case_cfg: dict[str, str], length: float, height: float) -> MeshData:
     """Generate one textbook mesh pattern directly from figure 2.3.
 
     For QH the base Q4 mesh is enriched with midside nodes to produce Q8.
@@ -400,11 +394,11 @@ def generate_beam_mesh(case_cfg: dict[str, str]) -> MeshData:
     mesh_pattern = case_cfg["mesh_pattern"]
     element_version = case_cfg["element_version"]
     if mesh_pattern.startswith("Q"):
-        base_mesh = _build_quad_mesh(mesh_pattern)
+        base_mesh = _build_quad_mesh(mesh_pattern, length, height)
         if element_version == "QH":
             return enrich_q4_to_q8(base_mesh)
         return base_mesh
-    base_mesh = _build_triangle_mesh(mesh_pattern)
+    base_mesh = _build_triangle_mesh(mesh_pattern, length, height)
     if element_version == "TH":
         return enrich_tri3_to_tri6(base_mesh)
     return base_mesh
@@ -955,65 +949,6 @@ def t6_stiffness(coords: np.ndarray, constitutive: np.ndarray, thickness: float)
 
 
 # ---------------------------------------------------------------------------
-# CST splitting utilities
-# ---------------------------------------------------------------------------
-
-
-def q4_to_2cst(q4_elements: np.ndarray) -> np.ndarray:
-    """Split each Q4 into 2 CST triangles using a single diagonal (SW-NE).
-
-    This is the same pattern used in sec_02/2.1/1 (T2 case).
-
-    Args:
-        q4_elements: Shape (E, 4) with columns [SW, SE, NE, NW].
-
-    Returns:
-        Shape (2E, 3) triangle connectivity.
-    """
-    tri_list: list[list[int]] = []
-    for n_sw, n_se, n_ne, n_nw in q4_elements:
-        tri_list.append([n_sw, n_se, n_ne])
-        tri_list.append([n_sw, n_ne, n_nw])
-    return np.asarray(tri_list, dtype=int)
-
-
-def q4_to_4cst(
-    q4_elements: np.ndarray,
-    nodes: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Split each Q4 into 4 CST triangles by inserting a centroid node (X-split).
-
-    A centroid node is added at the geometric centre of each Q4 cell.
-    Four triangles are formed: (SW,SE,C), (SE,NE,C), (NE,NW,C), (NW,SW,C).
-    This produces the [T1] / [T3] patterns from figure 2.3.
-
-    Args:
-        q4_elements: Shape (E, 4) with columns [SW, SE, NE, NW].
-        nodes: Existing node coordinates, shape (N, 2).
-
-    Returns:
-        Tuple of:
-          - new_nodes (N + E, 2): original nodes extended with centroid nodes
-          - triangles (4E, 3): triangle connectivity referencing new_nodes
-    """
-    new_nodes = list(nodes)
-    tri_list: list[list[int]] = []
-
-    for conn in q4_elements:
-        n_sw, n_se, n_ne, n_nw = conn
-        centroid = np.mean(nodes[conn], axis=0)
-        c_idx = len(new_nodes)
-        new_nodes.append(centroid)
-
-        tri_list.append([n_sw, n_se, c_idx])
-        tri_list.append([n_se, n_ne, c_idx])
-        tri_list.append([n_ne, n_nw, c_idx])
-        tri_list.append([n_nw, n_sw, c_idx])
-
-    return np.asarray(new_nodes, dtype=float), np.asarray(tri_list, dtype=int)
-
-
-# ---------------------------------------------------------------------------
 # System assembly
 # ---------------------------------------------------------------------------
 
@@ -1024,7 +959,7 @@ def assemble_system(
     constitutive: np.ndarray,
     thickness: float,
     traction_y: float,
-) -> tuple[object, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[csr_matrix, np.ndarray, np.ndarray, np.ndarray]:
     """Assemble global stiffness matrix and force vector for one case."""
     nodes = mesh.nodes
 
@@ -1335,6 +1270,10 @@ def solve_case(
     case_cfg: dict[str, str],
     constitutive: np.ndarray,
     analytical: AnalyticalSolution,
+    length: float,
+    height: float,
+    thickness: float,
+    traction_y: float,
 ) -> tuple[CaseResult, np.ndarray]:
     """Solve one FEM case and compute all metrics.
 
@@ -1347,10 +1286,7 @@ def solve_case(
     mesh_pattern = case_cfg["mesh_pattern"]
     element_version = case_cfg["element_version"]
 
-    thickness = float(material_props["thickness"])
-    traction_y = float(loads["right_traction_y"])
-
-    mesh = generate_beam_mesh(case_cfg)
+    mesh = generate_beam_mesh(case_cfg, length, height)
 
     start = time.perf_counter()
     stiffness, force, elements, nodes = assemble_system(mesh, element_version, constitutive, thickness, traction_y)
@@ -1374,8 +1310,6 @@ def solve_case(
     tip_deflection = float(abs(np.mean(tip_deflections)))
 
     # Cross-section stress at fixed end (x ≈ 0).
-    L = float(geometry["length"])
-    h = float(geometry["height"])
     cell_w = mesh.characteristic_dx
     x_tol = cell_w * 0.6
 
@@ -1385,11 +1319,11 @@ def solve_case(
     else:
         sigma_x_fixed = 0.0
 
-    # Shear stress at neutral axis (y ≈ h/2) at mid-span.
-    x_mid = L / 2.0
+    # Shear stress at neutral axis (y ≈ height/2) at mid-span.
+    x_mid = length / 2.0
     y_mid_section, _, tau_vals = extract_cross_section_stress(centers, stress, x_target=x_mid, x_tol=x_tol)
     if tau_vals.size > 0:
-        neutral_mask = np.abs(y_mid_section - h / 2.0) <= (h / 2.0 * 0.5)
+        neutral_mask = np.abs(y_mid_section - height / 2.0) <= (height / 2.0 * 0.5)
         if np.any(neutral_mask):
             tau_neutral = float(np.mean(np.abs(tau_vals[neutral_mask])))
         else:
@@ -1479,6 +1413,8 @@ def plot_case_combined(
     nodes: np.ndarray,
     result: CaseResult,
     output_dir: Path,
+    length: float,
+    height: float,
 ) -> None:
     """Save a single combined figure (mesh / displacement / Von Mises) for one case.
 
@@ -1487,6 +1423,8 @@ def plot_case_combined(
         nodes: Node array used in this case (may include midside nodes for QH/TH).
         result: Solved case result.
         output_dir: Directory to save figures.
+        length: Beam length in mm.
+        height: Beam height in mm.
     """
     fig, axes = plt.subplots(1, 3, figsize=(18, 4))
     fig.suptitle(f"Case {result.case_name}", fontsize=11)
@@ -1502,8 +1440,8 @@ def plot_case_combined(
     ax0.scatter(mesh.nodes[:, 0], mesh.nodes[:, 1], s=12, color="tab:red", zorder=3)
     ax0.set_xlabel("x [mm]")
     ax0.set_ylabel("y [mm]")
-    ax0.set_xlim(-1.0, float(geometry["length"]) + 1.0)
-    ax0.set_ylim(-0.8, float(geometry["height"]) + 0.8)
+    ax0.set_xlim(-1.0, length + 1.0)
+    ax0.set_ylim(-0.8, height + 0.8)
 
     # Panel 1: Displacement magnitude (Gouraud shading on enriched node set)
     ax1 = axes[1]
@@ -1540,6 +1478,10 @@ def plot_stress_profiles(
     results: list[CaseResult],
     analytical: AnalyticalSolution,
     output_dir: Path,
+    length: float,
+    height: float,
+    thickness: float,
+    traction_y: float,
 ) -> None:
     """Plot sigma_x distribution at x=0 and tau_xy distribution at x=L/2.
 
@@ -1547,35 +1489,38 @@ def plot_stress_profiles(
         results: All solved cases.
         analytical: Analytical solution.
         output_dir: Save directory.
+        length: Beam length in mm.
+        height: Beam height in mm.
+        thickness: Out-of-plane thickness in mm.
+        traction_y: Right-face shear traction (negative = downward) in N/mm^2.
     """
-    h = float(geometry["height"])
-    L = float(geometry["length"])
-    b = float(material_props["thickness"])
-    P = abs(float(loads["right_traction_y"]) * h * b)
-    I = b * h**3 / 12.0
+    L = length
+    b = thickness
+    P = abs(traction_y * height * b)
+    moment_of_inertia = b * height**3 / 12.0
 
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle("Cross-section stress profiles", fontsize=11)
 
-    # Theoretical sigma_x at x=0: sigma_x = M*z/I, M = P*L, z = y - h/2
-    y_th = np.linspace(0.0, h, 100)
-    z_th = y_th - h / 2.0
-    sxx_th = P * L * z_th / I
+    # Theoretical sigma_x at x=0: sigma_x = M*z/I, M = P*L, z = y - height/2
+    y_th = np.linspace(0.0, height, 100)
+    z_th = y_th - height / 2.0
+    sxx_th = P * L * z_th / moment_of_inertia
     ax0.plot(sxx_th, y_th, "k--", linewidth=2, label="Beam theory")
     ax0.set_title("sigma_x at x ≈ 0 (fixed end)")
     ax0.set_xlabel("sigma_x [MPa]")
     ax0.set_ylabel("y [mm]")
 
     # Theoretical tau_xy at x=L/2: parabolic
-    tau_th = 1.5 * P / (b * h) * (1.0 - (2.0 * z_th / h) ** 2)
+    tau_th = 1.5 * P / (b * height) * (1.0 - (2.0 * z_th / height) ** 2)
     ax1.plot(tau_th, y_th, "k--", linewidth=2, label="Beam theory")
     ax1.set_title("tau_xy at x = L/2")
     ax1.set_xlabel("tau_xy [MPa]")
     ax1.set_ylabel("y [mm]")
 
     for res in results:
-        cell_w = mesh_pattern_cfg[res.mesh_pattern]["nx"]
-        cell_w = L / cell_w
+        nx = mesh_pattern_cfg[res.mesh_pattern]["nx"]
+        cell_w = L / nx
         x_tol = cell_w * 0.6
 
         y0, sxx0, _ = extract_cross_section_stress(res.element_centers, res.element_stress, x_target=cell_w * 0.5, x_tol=x_tol)
@@ -1669,28 +1614,48 @@ def save_comparison(
         output_dir: Directory to write the CSV file.
     """
     csv_path = output_dir / "comparison_metrics.csv"
-    header = (
-        "case,mesh_pattern,element_version,dof,"
-        "tip_deflection_mm,ref_EB_mm,ref_timoshenko_mm,error_vs_timoshenko_pct,"
-        "sigma_x_fixed_end_MPa,ref_sigma_x_MPa,"
-        "tau_xy_neutral_MPa,ref_tau_xy_MPa,"
-        "max_von_mises_MPa,force_balance_error,solve_time_s"
-    )
-    lines = [header]
-    for r in results:
-        ref_t = analytical.tip_deflection_timoshenko_mm
-        err_t = abs(r.tip_deflection_mm - ref_t) / ref_t * 100.0 if ref_t else 0.0
-        line = (
-            f"{r.case_name},{r.mesh_pattern},{r.element_version},{r.dof_count},"
-            f"{r.tip_deflection_mm:.6f},{analytical.tip_deflection_EB_mm:.6f},"
-            f"{analytical.tip_deflection_timoshenko_mm:.6f},{err_t:.3f},"
-            f"{r.sigma_x_fixed_end_MPa:.4f},{abs(analytical.sigma_x_fixed_end_MPa):.4f},"
-            f"{r.tau_xy_neutral_axis_MPa:.4f},{analytical.tau_xy_neutral_MPa:.4f},"
-            f"{r.max_von_mises:.4f},{r.force_balance_error:.4e},{r.solve_time_s:.4f}"
-        )
-        lines.append(line)
-
-    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    fieldnames = [
+        "case",
+        "mesh_pattern",
+        "element_version",
+        "dof",
+        "tip_deflection_mm",
+        "ref_EB_mm",
+        "ref_timoshenko_mm",
+        "error_vs_timoshenko_pct",
+        "sigma_x_fixed_end_MPa",
+        "ref_sigma_x_MPa",
+        "tau_xy_neutral_MPa",
+        "ref_tau_xy_MPa",
+        "max_von_mises_MPa",
+        "force_balance_error",
+        "solve_time_s",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(fieldnames)
+        for r in results:
+            ref_t = analytical.tip_deflection_timoshenko_mm
+            err_t = abs(r.tip_deflection_mm - ref_t) / ref_t * 100.0 if ref_t else 0.0
+            writer.writerow(
+                [
+                    r.case_name,
+                    r.mesh_pattern,
+                    r.element_version,
+                    r.dof_count,
+                    f"{r.tip_deflection_mm:.6f}",
+                    f"{analytical.tip_deflection_EB_mm:.6f}",
+                    f"{analytical.tip_deflection_timoshenko_mm:.6f}",
+                    f"{err_t:.3f}",
+                    f"{r.sigma_x_fixed_end_MPa:.4f}",
+                    f"{abs(analytical.sigma_x_fixed_end_MPa):.4f}",
+                    f"{r.tau_xy_neutral_axis_MPa:.4f}",
+                    f"{analytical.tau_xy_neutral_MPa:.4f}",
+                    f"{r.max_von_mises:.4f}",
+                    f"{r.force_balance_error:.4e}",
+                    f"{r.solve_time_s:.4f}",
+                ]
+            )
     LOGGER.info("Saved %s", csv_path)
 
 
@@ -1704,6 +1669,12 @@ def run() -> None:
     output_dir = Path(output_options["output_dir"]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     LOGGER.info("Output directory ready: %s", output_dir)
+
+    # Extract configuration values once; pass explicitly to all functions.
+    length = float(geometry["length"])
+    height = float(geometry["height"])
+    thickness = float(material_props["thickness"])
+    traction_y = float(loads["right_traction_y"])
 
     # Analytical solution
     analytical = compute_analytical_solution(geometry, material_props, loads)
@@ -1727,19 +1698,19 @@ def run() -> None:
     for case_cfg in analysis_cases:
         case_name = case_cfg["name"]
         LOGGER.info("=== Solving case: %s ===", case_name)
-        mesh = generate_beam_mesh(case_cfg)
+        mesh = generate_beam_mesh(case_cfg, length, height)
         meshes.append(mesh)
-        result, nodes_used = solve_case(case_cfg, constitutive, analytical)
+        result, nodes_used = solve_case(case_cfg, constitutive, analytical, length, height, thickness, traction_y)
         results.append(result)
         nodes_per_case.append(nodes_used)
 
     # Per-case combined plots (mesh + displacement + Von Mises in one figure)
     if output_options.get("plot_case_fields", True):
         for mesh, result, nodes_used in zip(meshes, results, nodes_per_case):
-            plot_case_combined(mesh, nodes_used, result, output_dir)
+            plot_case_combined(mesh, nodes_used, result, output_dir, length, height)
 
     # Cross-section stress profiles
-    plot_stress_profiles(results, analytical, output_dir)
+    plot_stress_profiles(results, analytical, output_dir, length, height, thickness, traction_y)
 
     # Bar chart comparison
     plot_comparison_summary(results, analytical, output_dir)
