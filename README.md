@@ -28,37 +28,6 @@
 - Libraries: NumPy, SciPy, Matplotlib
 - Code Generation: 本プロジェクトのベースコードは、論理的な一貫性と透明性を担保するため、LLM（GitHub Copilot等）を活用して生成されています。
 
-### 実行と可視化
-
-- 全体実行: uv run sec01-run-all
-	- 計算結果（JSON/CSV）に加えて、可視化画像を出力します。
-- ベンチマーク別実行:
-	- uv run sec01-b01
-	- uv run sec01-b02
-- 可視化のみ再生成:
-	- uv run sec01-plot-b01
-	- uv run sec01-plot-b02
-- アニメーションのみ再生成:
-	- uv run sec01-animate-b01
-	- uv run sec01-animate-b02
-
-B02 の比較対象は `FVM`, `SPH` です。B02 では `FEM` は実行しません。
-
-`uv run sec01-animate-b02` は B02 の標準 side-view timeseries（FVM vs SPH）を出力します。
-
-主な出力先:
-
-- sec_01/outputs/B01/B01_metrics.csv
-- sec_01/outputs/B02/B02_metrics.csv
-- sec_01/outputs/B01/figs
-- sec_01/outputs/B02/figs
-- sec_01/outputs/B01/animations
-- sec_01/outputs/B02/animations
-
-B02 の主なアニメーション出力:
-
-- sec_01/outputs/B02/animations/B02_timeseries.gif
-- sec_01/outputs/B02/animations/B02_timeseries.mp4
 
 ## 4. 参考書籍
 
