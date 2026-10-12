@@ -1,4 +1,4 @@
-"""Render B02 side-view timeseries animation with FVM and SPH."""
+"""Render B02 diagnostics for distinct FVM and SPH models."""
 
 from __future__ import annotations
 
@@ -132,7 +132,7 @@ def _clear_existing_b02_frames(frames_dir: Path) -> int:
 
 
 def main() -> None:
-    """Generate B02 side-view timeseries animation for FVM and SPH."""
+    """Generate B02 model-diagnostic timeseries animation."""
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
@@ -159,26 +159,22 @@ def main() -> None:
     fvm_ts = fvm_payload.get("metadata", {}).get("viz_timeseries", {})
     sph_ts = sph_payload.get("metadata", {}).get("viz_timeseries", {})
 
-    fvm_profiles = fvm_ts.get("free_surface_y_series", []) or fvm_ts.get("height_centerline_series", [])
+    fvm_profiles = fvm_ts.get("height_centerline_series", [])
     fvm_x_axis = np.asarray(fvm_ts.get("x_coord", []), dtype=float)
     if not fvm_profiles:
-        raise ValueError("FVM free-surface timeseries is missing in B02_FVM_result.json")
+        raise ValueError("FVM centerline-depth timeseries is missing in B02_FVM_result.json")
     if fvm_x_axis.size == 0:
         fvm_x_axis = np.arange(len(fvm_profiles[0]), dtype=float)
 
-    sph_x_series = sph_ts.get("sideview_particle_x_series", []) or sph_ts.get("particle_x_series", [])
-    sph_y_series = sph_ts.get("sideview_particle_y_series", []) or sph_ts.get("particle_y_series", [])
+    sph_x_series = sph_ts.get("particle_x_series", [])
+    sph_y_series = sph_ts.get("particle_y_series", [])
     if not sph_x_series or not sph_y_series:
         raise ValueError("SPH particle timeseries is missing in B02_SPH_result.json")
 
     fvm_len = len(fvm_profiles)
-    sph_sideview_times = np.asarray(sph_ts.get("sideview_frame_times", []), dtype=float)
     sph_len = min(len(sph_x_series), len(sph_y_series))
     fvm_times = _series_times(fvm_ts, fvm_len)
-    if sph_sideview_times.size >= sph_len and sph_len > 0:
-        sph_times = sph_sideview_times[:sph_len]
-    else:
-        sph_times = _series_times(sph_ts, sph_len)
+    sph_times = _series_times(sph_ts, sph_len)
 
     compare_end_s = float(cfg.get("animation_compare_end_s", 0.60))
     compare_frames = int(cfg.get("animation_compare_frames", 180))
@@ -198,6 +194,7 @@ def main() -> None:
     axis_x_max = float(cfg.get("plot_axis_x_max", 1.0))
     axis_y_min = float(cfg.get("plot_axis_y_min", 0.0))
     axis_y_max = float(cfg.get("plot_axis_y_max", 1.0))
+    sph_domain_y = float(cfg.get("sph_domain_y", 1.0))
     front_y_min = float(cfg.get("plot_front_y_min", 0.0))
     front_y_max = float(cfg.get("plot_front_y_max", 1.05))
 
@@ -227,9 +224,9 @@ def main() -> None:
         axes[0].fill_between(x_axis, axis_y_min, profile, color="#9ECAE1", alpha=0.65)
         axes[0].plot(x_axis, profile, color="#1F4E79", linewidth=1.6)
         axes[0].axvline(1.0, color="#333333", linestyle="--", linewidth=1.0, alpha=0.9)
-        axes[0].set_title("FVM side-view")
+        axes[0].set_title("FVM: depth at horizontal midline")
         axes[0].set_xlabel("x / L [-]")
-        axes[0].set_ylabel("y / H [-]")
+        axes[0].set_ylabel("depth h / L [-]")
         axes[0].set_xlim(axis_x_min, axis_x_max)
         axes[0].set_ylim(axis_y_min, axis_y_max)
         axes[0].set_aspect("equal", adjustable="box")
@@ -257,11 +254,11 @@ def main() -> None:
             sy = sy[sample_idx]
         axes[1].scatter(sx, sy, s=6, alpha=0.45, color="#E45756")
         axes[1].axvline(1.0, color="#333333", linestyle="--", linewidth=1.0, alpha=0.9)
-        axes[1].set_title("SPH side-view")
+        axes[1].set_title("SPH: vertical particle section")
         axes[1].set_xlabel("x / L [-]")
-        axes[1].set_ylabel("y / H [-]")
+        axes[1].set_ylabel("vertical y / L [-]")
         axes[1].set_xlim(axis_x_min, axis_x_max)
-        axes[1].set_ylim(axis_y_min, axis_y_max)
+        axes[1].set_ylim(axis_y_min, sph_domain_y)
         axes[1].set_aspect("equal", adjustable="box")
         axes[1].grid(alpha=0.2)
 
@@ -290,7 +287,7 @@ def main() -> None:
         )
 
         fig.suptitle(
-            f"B02 timeseries side-view FVM vs SPH  target={target_time:.3f}s  fvm={fvm_time_now:.3f}s  sph={sph_time_now:.3f}s"
+            f"B02 distinct model diagnostics  target={target_time:.3f}s  fvm={fvm_time_now:.3f}s  sph={sph_time_now:.3f}s"
         )
         fig.tight_layout()
 

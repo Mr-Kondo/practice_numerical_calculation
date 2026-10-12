@@ -1,4 +1,4 @@
-"""Run and compare all B02 methods."""
+"""Run the two B02 models and save their diagnostics."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from sec_01.shared.runtime import (
 
 
 def main() -> None:
-    """Execute B02 comparison and persist outputs."""
+    """Execute both B02 models and persist outputs."""
 
     configure_logging()
     cfg_path = Path(__file__).with_name("B02_common_cfg.yaml")
@@ -28,16 +28,14 @@ def main() -> None:
     seed_everything(int(cfg["seed"]))
 
     outputs = Path(__file__).resolve().parents[2] / "outputs" / cfg["output_subdir"]
-    prefer_gpu = bool(cfg.get("prefer_gpu", False))
 
-    runners = [run_fvm, run_sph]
+    runners = [("FVM", run_fvm), ("SPH", run_sph)]
 
     results = []
-    for runner in runners:
-        method_name = runner.__name__.removeprefix("run_").upper()
+    for method_name, runner in runners:
         try:
             with Timer() as timer:
-                result = runner(cfg, prefer_gpu=prefer_gpu)
+                result = runner(cfg, prefer_gpu=False)
             result.metrics["wall_time_s"] = timer.elapsed_seconds
             result.metrics.setdefault("completion_flag", 1.0)
             result.metadata.setdefault("status", "success")

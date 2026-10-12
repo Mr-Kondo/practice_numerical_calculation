@@ -1,7 +1,6 @@
 """Run a focused SPH right-wall parameter scan for B02.
 
-This utility sweeps only right-wall parameters and writes a CSV summary
-for quick calibration of rebound behavior.
+This utility sweeps only right-wall parameters and writes rebound diagnostics.
 """
 
 from __future__ import annotations
@@ -102,7 +101,7 @@ def _to_row(
         "sph_right_wall_restitution_min": min_restitution,
         "sph_right_wall_speed_ref": speed_ref,
         "sph_right_wall_tangent_damping": tangential_damping,
-        "acceptance_pass": float(metrics.get("acceptance_pass", 0.0)),
+        "completion_flag": float(metrics.get("completion_flag", 0.0)),
         "rebound_flag": float(metrics.get("rebound_flag", 0.0)),
         "rebound_drop": float(metrics.get("rebound_drop", float("nan"))),
         "front_arrival_time": float(metrics.get("front_arrival_time", float("nan"))),
@@ -139,7 +138,6 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     output_csv = args.output_csv or (output_root / "B02_right_wall_scan.csv")
 
-    prefer_gpu = bool(cfg.get("prefer_gpu", False))
     rows: list[dict[str, float]] = []
 
     for min_restitution, speed_ref, tangential_damping in product(mins, speed_refs, dampings):
@@ -149,7 +147,7 @@ def main() -> None:
         case_cfg["sph_right_wall_tangent_damping"] = float(tangential_damping)
 
         with Timer() as timer:
-            result = run_sph(case_cfg, prefer_gpu=prefer_gpu)
+            result = run_sph(case_cfg, prefer_gpu=False)
 
         row = _to_row(
             min_restitution=float(min_restitution),
@@ -161,22 +159,22 @@ def main() -> None:
         rows.append(row)
 
         LOGGER.info(
-            "scan min=%.3f speed_ref=%.3f damping=%.3f -> accept=%.0f rebound=%.0f drop=%.3f",
+            "scan min=%.3f speed_ref=%.3f damping=%.3f -> completion=%.0f rebound=%.0f drop=%.3f",
             row["sph_right_wall_restitution_min"],
             row["sph_right_wall_speed_ref"],
             row["sph_right_wall_tangent_damping"],
-            row["acceptance_pass"],
+            row["completion_flag"],
             row["rebound_flag"],
             row["rebound_drop"],
         )
 
-    rows.sort(key=lambda item: (item["acceptance_pass"], item["rebound_flag"], item["rebound_drop"]), reverse=True)
+    rows.sort(key=lambda item: (item["completion_flag"], item["rebound_flag"], item["rebound_drop"]), reverse=True)
 
     fieldnames = [
         "sph_right_wall_restitution_min",
         "sph_right_wall_speed_ref",
         "sph_right_wall_tangent_damping",
-        "acceptance_pass",
+        "completion_flag",
         "rebound_flag",
         "rebound_drop",
         "front_arrival_time",
@@ -190,19 +188,19 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-    passed = sum(1 for row in rows if row["acceptance_pass"] > 0.5)
+    completed = sum(1 for row in rows if row["completion_flag"] > 0.5)
     rebounds = sum(1 for row in rows if row["rebound_flag"] > 0.5)
 
-    print(f"scan cases={len(rows)} accept_pass={passed} rebound_pass={rebounds}")
+    print(f"scan cases={len(rows)} completed={completed} rebound_events={rebounds}")
     print(f"summary_csv={output_csv}")
     if rows:
         top = rows[0]
         print(
-            "best="
+            "top_diagnostic_case="
             f"min={top['sph_right_wall_restitution_min']:.3f},"
             f"speed_ref={top['sph_right_wall_speed_ref']:.3f},"
             f"damping={top['sph_right_wall_tangent_damping']:.3f},"
-            f"accept={top['acceptance_pass']:.0f},"
+            f"completion={top['completion_flag']:.0f},"
             f"rebound={top['rebound_flag']:.0f},"
             f"drop={top['rebound_drop']:.3f}"
         )

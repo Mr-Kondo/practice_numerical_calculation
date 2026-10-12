@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 
-from sec_01.shared.gpu_backend import select_backend
 from sec_01.shared.runtime import MethodResult
 
 LOGGER = logging.getLogger(__name__)
@@ -161,12 +160,21 @@ def _laplacian(field: np.ndarray, dx: float, dy: float) -> np.ndarray:
     return lap_x + lap_y
 
 
-def _compute_vorticity(u: np.ndarray, v: np.ndarray, dx: float, dy: float) -> np.ndarray:
+def _compute_vorticity(u: np.ndarray, v: np.ndarray, wet: np.ndarray, dx: float, dy: float) -> np.ndarray:
     """Compute depth-averaged vorticity omega = dv/dx - du/dy."""
 
     dvdx = np.gradient(v, dx, axis=1, edge_order=1)
     dudy = np.gradient(u, dy, axis=0, edge_order=1)
-    return dvdx - dudy
+    omega = dvdx - dudy
+    supported = np.zeros_like(wet)
+    supported[1:-1, 1:-1] = (
+        wet[1:-1, 1:-1]
+        & wet[1:-1, :-2]
+        & wet[1:-1, 2:]
+        & wet[:-2, 1:-1]
+        & wet[2:, 1:-1]
+    )
+    return np.where(supported, omega, 0.0)
 
 
 def _front_position(
@@ -195,7 +203,6 @@ def _front_position(
 def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     """Run a 2-D shallow-water finite-volume dam-break solver."""
 
-    backend = select_backend(prefer_gpu=prefer_gpu)
     nx = int(config["grid_nx"])
     ny = int(config.get("grid_ny", 80))
     steps = int(config["steps"])
@@ -208,13 +215,12 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     ambient_depth = float(config.get("fvm_ambient_depth", 1.0e-4))
     transverse_perturbation = float(config.get("fvm_transverse_perturbation", 0.10))
     vortex_threshold = float(config.get("fvm_vorticity_threshold", 0.75))
-    vortex_min_duration = float(config.get("fvm_vortex_min_duration_s", 0.05))
     vortex_min_area = float(config.get("fvm_vortex_min_area", 0.01))
     runup_band_x = float(config.get("runup_band_x", 0.95))
     front_threshold = float(config.get("front_threshold", 2.5e-3))
     front_percentile = float(config.get("fvm_front_percentile", 0.995))
     front_target_x = float(config.get("column_x_fraction", 0.72))
-    impact_x = float(config.get("accept_front_reach_x", 0.95))
+    impact_x = float(config.get("impact_x", 0.95))
     rebound_window = float(config.get("rebound_window_s", 0.10))
     rebound_min_drop = float(config.get("rebound_min_drop", 0.08))
     rebound_velocity_threshold = float(config.get("fvm_rebound_velocity_threshold", -0.02))
@@ -233,6 +239,10 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     right_boundary = str(config.get("right_boundary", "reflective")).strip().lower()
     if right_boundary not in {"reflective", "open"}:
         raise ValueError(f"Unsupported B02 FVM right_boundary={right_boundary!r}")
+    if nx < 3 or ny < 3 or gravity <= 0.0 or ambient_depth < 0.0:
+        raise ValueError("B02 FVM requires grid dimensions >= 3, gravity > 0, and ambient depth >= 0")
+    if not 0.0 < cfl <= 0.5 or viscosity < 0.0 or dt_base <= 0.0:
+        raise ValueError("B02 FVM requires 0 < fvm_cfl <= 0.5, fvm_viscosity >= 0, and dt > 0")
 
     dx = 1.0 / nx
     dy = 1.0 / ny
@@ -266,7 +276,6 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     front_position_series: list[float] = []
     depth_field_series: list[list[list[float]]] = []
     height_centerline_series: list[list[float]] = []
-    volume_fraction_series: list[list[list[float]]] = []
     velocity_x_series: list[list[list[float]]] = []
     velocity_y_series: list[list[list[float]]] = []
     vorticity_series: list[list[list[float]]] = []
@@ -279,6 +288,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
 
     simulated_time = 0.0
     max_runup_like_height = 0.0
+    escaped_mass = 0.0
 
     for step in range(max_steps):
         if simulated_time >= target_sim_time:
@@ -290,8 +300,8 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         transverse_speed = np.max(np.abs(v) + np.sqrt(gravity * np.maximum(h, 0.0)))
         dt_x = dx / max(float(wave_speed), 1.0e-8)
         dt_y = dy / max(float(transverse_speed), 1.0e-8)
-        dt_step = min(dt_base, cfl * min(dt_x, dt_y), target_sim_time - simulated_time)
-        dt_step = max(dt_step, 1.0e-6)
+        diffusion_dt = 0.5 / (viscosity * (1.0 / dx**2 + 1.0 / dy**2)) if viscosity else float("inf")
+        dt_step = min(dt_base, cfl * min(dt_x, dt_y), diffusion_dt, target_sim_time - simulated_time)
 
         h_left = np.empty((ny, nx + 1), dtype=np.float64)
         hu_left = np.empty((ny, nx + 1), dtype=np.float64)
@@ -322,7 +332,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         if right_boundary == "reflective":
             hu_right[:, nx] = -hu[:, -1]
         else:
-            hu_right[:, nx] = np.maximum(0.0, hu[:, -1])
+            hu_right[:, nx] = hu[:, -1]
 
         flux_h_x, flux_hu_x, flux_hv_x = _hll_flux_x(
             h_left=h_left,
@@ -333,6 +343,12 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             hv_right=hv_right,
             gravity=gravity,
         )
+        if right_boundary == "open":
+            inward = flux_h_x[:, nx] < 0.0
+            flux_h_x[inward, nx] = 0.0
+            flux_hu_x[inward, nx] = 0.0
+            flux_hv_x[inward, nx] = 0.0
+            escaped_mass += float(np.sum(flux_h_x[:, nx]) * dy * dt_step)
 
         h_bottom = np.empty((ny + 1, nx), dtype=np.float64)
         hu_bottom = np.empty((ny + 1, nx), dtype=np.float64)
@@ -380,8 +396,9 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             hu += dt_step * viscosity * _laplacian(hu, dx=dx, dy=dy)
             hv += dt_step * viscosity * _laplacian(hv, dx=dx, dy=dy)
 
-        h = np.maximum(h, ambient_depth)
-        dry_mask = h <= max(ambient_depth * 1.1, DRY_TOL)
+        if not np.isfinite(h).all() or np.any(h < 0.0):
+            raise FloatingPointError("B02 FVM produced a non-finite or negative water depth")
+        dry_mask = h <= DRY_TOL
         hu[dry_mask] = 0.0
         hv[dry_mask] = 0.0
         simulated_time += dt_step
@@ -392,7 +409,7 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         if step % sample_interval == 0 or step == max_steps - 1 or simulated_time >= target_sim_time:
             u = _safe_velocity(h, hu)
             v = _safe_velocity(h, hv)
-            omega = _compute_vorticity(u, v, dx=dx, dy=dy)
+            omega = _compute_vorticity(u, v, h > front_threshold, dx=dx, dy=dy)
             vortex_area = float(np.mean(np.abs(omega) >= vortex_threshold))
             right_band_u = u[:, int(np.floor(impact_x * nx)) :]
             right_band_depth = h[:, int(np.floor(impact_x * nx)) :]
@@ -429,7 +446,6 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             )
             depth_field_series.append(h.tolist())
             height_centerline_series.append(h[ny // 2, :].tolist())
-            volume_fraction_series.append(np.clip(h / max(initial_depth, 1.0e-6), 0.0, 1.0).tolist())
             velocity_x_series.append(u.tolist())
             velocity_y_series.append(v.tolist())
             vorticity_series.append(omega.tolist())
@@ -441,9 +457,9 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             inner_band_wet_mass_series.append(float(inner_band_wet_mass))
 
     final_mass = float(np.sum(h) * dx * dy)
-    mass_error = abs(final_mass - initial_mass) / max(initial_mass, 1.0e-12)
+    mass_error = abs(final_mass + escaped_mass - initial_mass) / max(initial_mass, 1.0e-12)
     retained_mass_fraction = final_mass / max(initial_mass, 1.0e-12)
-    escaped_mass_fraction = max(initial_mass - final_mass, 0.0) / max(initial_mass, 1.0e-12)
+    escaped_mass_fraction = escaped_mass / max(initial_mass, 1.0e-12)
     spread_width = float(np.count_nonzero(np.max(h, axis=0) > front_threshold) * dx)
 
     front_arrival_time = float("nan")
@@ -506,28 +522,13 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
     for idx in range(1, len(sampled_times)):
         if vorticity_peak_series[idx] >= vortex_threshold and vortex_area_series[idx] >= vortex_min_area:
             vortex_duration_s += sampled_times[idx] - sampled_times[idx - 1]
-    vortex_pass = (
-        1.0
-        if vortex_peak >= vortex_threshold and vortex_area_peak >= vortex_min_area and vortex_duration_s >= vortex_min_duration
-        else 0.0
+    completion_flag = float(
+        simulated_time >= target_sim_time and np.isfinite(h).all() and np.isfinite(hu).all() and np.isfinite(hv).all()
     )
-
-    acceptance_pass = 0.0
-    if (
-        simulated_time >= target_sim_time
-        and front_reached_flag > 0.5
-        and rebound_flag > 0.5
-        and vortex_pass > 0.5
-        and mass_error <= float(config.get("accept_mass_error_max", 5.0e-3))
-        and retained_mass_fraction >= float(config.get("accept_retained_mass_min", 0.995))
-        and escaped_mass_fraction <= float(config.get("accept_escaped_mass_max", 0.005))
-        and max_runup_like_height >= float(config.get("accept_runup_min", 0.05))
-    ):
-        acceptance_pass = 1.0
 
     u_final = _safe_velocity(h, hu)
     v_final = _safe_velocity(h, hv)
-    omega_final = _compute_vorticity(u_final, v_final, dx=dx, dy=dy)
+    omega_final = _compute_vorticity(u_final, v_final, h > front_threshold, dx=dx, dy=dy)
 
     metrics = {
         "dof": float(nx * ny),
@@ -546,14 +547,12 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
         "vorticity_peak": float(vortex_peak),
         "vortex_area_peak": float(vortex_area_peak),
         "vortex_duration_s": float(vortex_duration_s),
-        "vortex_pass": float(vortex_pass),
-        "acceptance_pass": acceptance_pass,
-        "completion_flag": 1.0,
+        "completion_flag": completion_flag,
     }
 
     metadata = {
-        "status": "success",
-        "backend": backend.name,
+        "status": "success" if completion_flag else "incomplete",
+        "backend": "numpy",
         "notes": (
             "2-D shallow-water conservative finite-volume scheme (HLL fluxes in x/y) "
             f"with viscosity={viscosity:.3e}, right boundary={right_boundary}, "
@@ -576,7 +575,6 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             "grid_shape": [ny, nx],
             "height_centerline": h[ny // 2, :].tolist(),
             "depth_field": h.tolist(),
-            "volume_fraction": np.clip(h / max(initial_depth, 1.0e-6), 0.0, 1.0).tolist(),
             "velocity_x": u_final.tolist(),
             "velocity_y": v_final.tolist(),
             "vorticity": omega_final.tolist(),
@@ -596,8 +594,6 @@ def run(config: dict[str, Any], prefer_gpu: bool) -> MethodResult:
             "grid_shape": [ny, nx],
             "depth_field_series": depth_field_series,
             "height_centerline_series": height_centerline_series,
-            "free_surface_y_series": height_centerline_series,
-            "volume_fraction_series": volume_fraction_series,
             "velocity_x_series": velocity_x_series,
             "velocity_y_series": velocity_y_series,
             "vorticity_series": vorticity_series,
