@@ -1,8 +1,4 @@
-"""Run an acceptance-focused SPH parameter sweep for B02.
-
-This script targets wall reflection and artificial viscosity parameters and
-compares each SPH case against one FVM baseline arrival time.
-"""
+"""Explore B02 SPH wall and artificial-viscosity diagnostics."""
 
 from __future__ import annotations
 
@@ -11,27 +7,12 @@ import logging
 from copy import deepcopy
 from itertools import product
 from pathlib import Path
-from typing import Any
 
-from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_FVM_solver import run as run_fvm
 from sec_01.benchmarks.B02_dambreak_column_dynamic.B02_SPH_solver import run as run_sph
 from sec_01.shared.io import read_yaml
 from sec_01.shared.runtime import Timer, configure_logging, save_result, seed_everything
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _is_nan(value: float) -> bool:
-    """Return True if the input is NaN.
-
-    Args:
-        value: Scalar float value.
-
-    Returns:
-        True when value is NaN.
-    """
-
-    return value != value
 
 
 def _wall_profiles() -> list[dict[str, float]]:
@@ -103,43 +84,6 @@ def _build_cases() -> list[tuple[str, dict[str, float]]]:
     return cases
 
 
-def _run_fvm_baseline(config: dict[str, Any], prefer_gpu: bool) -> tuple[float, float]:
-    """Run FVM once and return arrival time and wall clock.
-
-    Args:
-        config: B02 configuration dictionary.
-        prefer_gpu: Backend preference flag.
-
-    Returns:
-        Tuple of (front_arrival_time, wall_time_s).
-    """
-
-    with Timer() as timer:
-        fvm_result = run_fvm(config, prefer_gpu=prefer_gpu)
-    arrival = float(fvm_result.metrics.get("front_arrival_time", float("nan")))
-    return arrival, timer.elapsed_seconds
-
-
-def _final_acceptance(sph_metrics: dict[str, float], fvm_arrival: float, max_diff: float) -> float:
-    """Compute final acceptance using existing B02 post criteria.
-
-    Args:
-        sph_metrics: SPH scalar metrics.
-        fvm_arrival: FVM baseline arrival time.
-        max_diff: Allowed arrival-time difference.
-
-    Returns:
-        Final acceptance flag as float in {0.0, 1.0}.
-    """
-
-    base_accept = float(sph_metrics.get("acceptance_pass", 0.0))
-    sph_arrival = float(sph_metrics.get("front_arrival_time", float("nan")))
-    if base_accept <= 0.5 or _is_nan(fvm_arrival) or _is_nan(sph_arrival):
-        return 0.0
-    diff = abs(fvm_arrival - sph_arrival)
-    return 1.0 if diff <= max_diff else 0.0
-
-
 def main() -> None:
     """Execute SPH sweep and write a compact summary CSV."""
 
@@ -154,11 +98,6 @@ def main() -> None:
     sweep_dir = output_root / "sweeps"
     summary_path = sweep_dir / "B02_sph_sweep_summary.csv"
 
-    prefer_gpu = bool(cfg.get("prefer_gpu", False))
-    accept_arrival_diff = float(cfg.get("accept_arrival_diff_s", 0.05))
-
-    fvm_arrival, fvm_wall_time = _run_fvm_baseline(cfg, prefer_gpu=prefer_gpu)
-    LOGGER.info("B02 sweep baseline FVM done: arrival=%.6f, wall_time=%.3fs", fvm_arrival, fvm_wall_time)
 
     cases = _build_cases()
     rows: list[dict[str, float | str]] = []
@@ -167,29 +106,18 @@ def main() -> None:
         case_cfg = deepcopy(cfg)
         case_cfg.update(override)
         with Timer() as timer:
-            result = run_sph(case_cfg, prefer_gpu=prefer_gpu)
+            result = run_sph(case_cfg, prefer_gpu=False)
         result.metrics["wall_time_s"] = timer.elapsed_seconds
         result.method = f"SPH_{case_name}"
         save_result(result, sweep_dir)
 
         metrics = result.metrics
-        arrival = float(metrics.get("front_arrival_time", float("nan")))
-        arrival_diff = abs(fvm_arrival - arrival) if not (_is_nan(fvm_arrival) or _is_nan(arrival)) else float("nan")
-        accept_final = _final_acceptance(
-            sph_metrics=metrics,
-            fvm_arrival=fvm_arrival,
-            max_diff=accept_arrival_diff,
-        )
-
         rows.append(
             {
                 "case": case_name,
                 "method": result.method,
-                "fvm_front_arrival_time": fvm_arrival,
-                "sph_front_arrival_time": arrival,
-                "arrival_diff_fvm_sph": arrival_diff,
-                "acceptance_pass": float(metrics.get("acceptance_pass", 0.0)),
-                "acceptance_pass_final": accept_final,
+                "front_arrival_time": float(metrics.get("front_arrival_time", float("nan"))),
+                "completion_flag": float(metrics.get("completion_flag", 0.0)),
                 "rebound_flag": float(metrics.get("rebound_flag", 0.0)),
                 "rebound_drop": float(metrics.get("rebound_drop", float("nan"))),
                 "retained_mass_fraction": float(metrics.get("retained_mass_fraction", float("nan"))),
@@ -205,11 +133,9 @@ def main() -> None:
             }
         )
         LOGGER.info(
-            "Sweep case %s: accept=%.0f final=%.0f arrival_diff=%.6f rebound=%.0f",
+            "Sweep case %s: completion=%.0f rebound=%.0f",
             case_name,
-            float(metrics.get("acceptance_pass", 0.0)),
-            accept_final,
-            arrival_diff,
+            float(metrics.get("completion_flag", 0.0)),
             float(metrics.get("rebound_flag", 0.0)),
         )
 
@@ -217,11 +143,8 @@ def main() -> None:
     fieldnames = [
         "case",
         "method",
-        "fvm_front_arrival_time",
-        "sph_front_arrival_time",
-        "arrival_diff_fvm_sph",
-        "acceptance_pass",
-        "acceptance_pass_final",
+        "front_arrival_time",
+        "completion_flag",
         "rebound_flag",
         "rebound_drop",
         "retained_mass_fraction",
@@ -240,9 +163,9 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-    passing = sum(1 for row in rows if float(row["acceptance_pass_final"]) > 0.5)
-    LOGGER.info("B02 SPH sweep done: %d/%d cases pass final acceptance.", passing, len(rows))
-    print(f"B02 SPH sweep done: {passing}/{len(rows)} cases pass final acceptance.")
+    completed = sum(1 for row in rows if float(row["completion_flag"]) > 0.5)
+    LOGGER.info("B02 SPH sweep done: %d/%d cases completed.", completed, len(rows))
+    print(f"B02 SPH sweep done: {completed}/{len(rows)} cases completed.")
     print(f"Summary written: {summary_path}")
 
 

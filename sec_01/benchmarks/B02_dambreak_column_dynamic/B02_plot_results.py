@@ -28,8 +28,8 @@ def _plot_fvm(ax: plt.Axes, payload: dict) -> None:
                 ax.contour(x_coord, y_coord, vorticity, levels=levels, colors="black", linewidths=0.5, alpha=0.5)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("x / L [-]")
-        ax.set_ylabel("y / H [-]")
-        ax.set_title("FVM depth + vorticity")
+        ax.set_ylabel("horizontal y / L [-]")
+        ax.set_title("FVM plan view: depth + vorticity")
         return
 
     x_idx = viz.get("x_index", [])
@@ -45,7 +45,7 @@ def _plot_sph(ax: plt.Axes, payload: dict) -> None:
     py = viz.get("particle_y", [])
     if px and py:
         ax.scatter(px, py, s=4, alpha=0.5, color="#E45756")
-    ax.set_title("Particle method (sample)")
+    ax.set_title("SPH vertical section (sample)")
 
 
 def _global_vorticity_limit(series: list) -> float:
@@ -86,10 +86,10 @@ def main() -> None:
             _plot_fvm(ax, payload)
         elif method == "SPH":
             _plot_sph(ax, payload)
-            ax.set_title(f"{method} particles (sample)")
+            ax.set_ylabel("vertical y / L [-]")
         if method in {"FVM", "SPH"}:
             ax.set_xlim(axis_x_min, axis_x_max)
-            ax.set_ylim(axis_y_min, axis_y_max)
+            ax.set_ylim(axis_y_min, float(cfg.get("sph_domain_y", 1.0)) if method == "SPH" else axis_y_max)
             ax.set_aspect("equal", adjustable="box")
         ax.grid(alpha=0.2)
 
@@ -111,21 +111,19 @@ def main() -> None:
         labels=labels,
         values=completion_values,
         output_path=fig_dir / "B02_completion_comparison.png",
-        title="B02: Completion Flag by Method",
+        title="B02: Run completion by model",
         ylabel="completion_flag",
     )
 
-    fig_front, ax_front = plt.subplots(1, 1, figsize=(7, 4), dpi=140)
-    has_series = False
-    for method, color in (("FVM", "#4C78A8"), (particle_method, "#E45756")):
+    fig_front, axes_front = plt.subplots(1, 2, figsize=(10, 4), dpi=140)
+    for ax_front, (method, color) in zip(axes_front, (("FVM", "#4C78A8"), (particle_method, "#E45756"))):
         payload = result_map.get(method, {})
         metrics = payload.get("metrics", {})
         ts = payload.get("metadata", {}).get("viz_timeseries", {})
         times = ts.get("frame_times", [])
         fronts = ts.get("front_position_series", [])
         if times and fronts and len(times) == len(fronts):
-            ax_front.plot(times, fronts, label=method, color=color, linewidth=1.8)
-            has_series = True
+            ax_front.plot(times, fronts, color=color, linewidth=1.8)
             arrival = float(metrics.get("front_arrival_time", float("nan")))
             if not np.isnan(arrival):
                 ax_front.axvline(arrival, color=color, linestyle="--", alpha=0.5)
@@ -135,31 +133,17 @@ def main() -> None:
                 ax_front.axvline(impact, color=color, linestyle=":", alpha=0.6)
             if not np.isnan(rebound):
                 ax_front.axvline(rebound, color=color, linestyle="-.", alpha=0.6)
+            ax_front.set_title(f"{method} front (model-specific)")
+            ax_front.set_xlabel("time [s]")
+            ax_front.set_ylabel("front position x/L [-]")
+            ax_front.set_xlim(0.0, compare_end_s)
+            ax_front.set_ylim(front_y_min, front_y_max)
+            ax_front.grid(alpha=0.2)
+        else:
+            ax_front.text(0.5, 0.5, "front series unavailable", ha="center", va="center")
+            ax_front.set_axis_off()
 
-    if has_series:
-        ax_front.set_title("B02 front position comparison")
-        ax_front.set_xlabel("time [s]")
-        ax_front.set_ylabel("front position x/L [-]")
-        ax_front.set_xlim(0.0, compare_end_s)
-        ax_front.set_ylim(front_y_min, front_y_max)
-        ax_front.grid(alpha=0.2)
-        ax_front.legend()
-        fvm_pass = float(result_map.get("FVM", {}).get("metrics", {}).get("acceptance_pass", 0.0)) > 0.5
-        sph_pass = float(result_map.get(particle_method, {}).get("metrics", {}).get("acceptance_pass", 0.0)) > 0.5
-        ax_front.text(
-            0.02,
-            0.98,
-            f"FVM={'PASS' if fvm_pass else 'FAIL'} / {particle_method}={'PASS' if sph_pass else 'FAIL'}",
-            transform=ax_front.transAxes,
-            ha="left",
-            va="top",
-            fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75},
-        )
-    else:
-        ax_front.text(0.5, 0.5, "front_position_series not available", ha="center", va="center")
-        ax_front.set_axis_off()
-
+    fig_front.suptitle("B02 front diagnostics: different model definitions")
     fig_front.tight_layout()
     fig_front.savefig(fig_dir / "B02_front_trajectory.png")
     plt.close(fig_front)
@@ -186,7 +170,7 @@ def main() -> None:
                 ax.contour(x_coord, y_coord, omega_now, levels=levels, colors="black", linewidths=0.45, alpha=0.55)
             ax.set_title(f"t={float(fvm_times[idx]):.3f}s")
             ax.set_xlabel("x / L [-]")
-            ax.set_ylabel("y / H [-]")
+            ax.set_ylabel("horizontal y / L [-]")
             ax.set_xlim(axis_x_min, axis_x_max)
             ax.set_ylim(axis_y_min, axis_y_max)
             ax.set_aspect("equal", adjustable="box")
